@@ -1,0 +1,6 @@
+interface:
+  display_name: "Pwn CTF"
+  short_description: "Binary exploitation for CTF challenges."
+  default_prompt: "Use $pwn-ctf to analyze this binary for vulnerabilities and develop an exploit."
+policy:
+  allow_implicit_invocation: true

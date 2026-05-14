@@ -1,0 +1,6 @@
+interface:
+  display_name: "Web CTF"
+  short_description: "Web exploitation for CTF challenges."
+  default_prompt: "Use $web-ctf to analyze this web application and find the vulnerability."
+policy:
+  allow_implicit_invocation: true

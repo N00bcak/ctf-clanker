@@ -1,0 +1,6 @@
+interface:
+  display_name: "Misc CTF"
+  short_description: "Miscellaneous CTF challenges: jail escapes, encodings, OSINT, and more."
+  default_prompt: "Use $misc-ctf to analyze this challenge and find the solution."
+policy:
+  allow_implicit_invocation: true

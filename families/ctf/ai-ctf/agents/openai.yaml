@@ -1,0 +1,6 @@
+interface:
+  display_name: "AI CTF"
+  short_description: "AI/ML security challenges: prompt injection, adversarial ML, model attacks."
+  default_prompt: "Use $ai-ctf to analyze this AI system and find the vulnerability."
+policy:
+  allow_implicit_invocation: true

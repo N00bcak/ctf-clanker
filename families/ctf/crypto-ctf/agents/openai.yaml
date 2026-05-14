@@ -1,0 +1,6 @@
+interface:
+  display_name: "Crypto CTF"
+  short_description: "Cryptographic analysis and attacks for CTF challenges."
+  default_prompt: "Use $crypto-ctf to analyze this cryptosystem and find the weakness."
+policy:
+  allow_implicit_invocation: true

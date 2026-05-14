@@ -1,0 +1,6 @@
+interface:
+  display_name: "Reverse CTF"
+  short_description: "Reverse engineering analysis for CTF challenges."
+  default_prompt: "Use $reverse-ctf to analyze this binary and recover the validation or transformation logic."
+policy:
+  allow_implicit_invocation: true

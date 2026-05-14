@@ -1,0 +1,6 @@
+interface:
+  display_name: "CTF Triage"
+  short_description: "Classify a CTF challenge and route to the right specialist."
+  default_prompt: "Use $ctf-triage to examine these challenge artifacts, classify the category, and decide where to start."
+policy:
+  allow_implicit_invocation: true
