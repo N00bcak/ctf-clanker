@@ -1,0 +1,81 @@
+server:
+  host: 127.0.0.1
+  port: 8787
+  auth:
+    mode: none
+    tokenEnv: WEBUI_AUTH_TOKEN
+
+paths:
+  cacheDir: webui/cache
+
+sqlite:
+  path: webui/cache/webui.sqlite3
+  wal: true
+  busyTimeoutMs: 5000
+
+codex:
+  credentialMode: codex-auth-json
+  authJsonPath: ~/.codex/auth.json
+  hostCliPath: auto
+  hostCliSandbox: workspace-write
+  hostCliApprovalPolicy: never
+  allowTerminalCredentialEnv: false
+  failIfMissingCredential: true
+  codexHomeRetention: purge-after-run
+
+network:
+  mode: open
+  allow: []
+  enforcement: open-warning
+
+limits:
+  attachments:
+    maxFiles: 50
+    maxFileBytes: 26214400
+    maxTotalBytes: 104857600
+  taskCacheDirQuotaMb: 2048
+  quotaEnforcement: soft
+  maxLogBytesPerFile: 52428800
+
+local:
+  enabled: true
+  concurrency: 1
+  provider: docker
+  dockerHost: auto
+  runnerImage: mecha-codex-runner:base
+  defaultCpu: 1
+  defaultMemoryMb: 1024
+  pidsLimit: 512
+
+cloud:
+  provider: digitalocean
+  enabled: false
+  dryRun: true
+  liveEnvGuard: WEBUI_CLOUD_LIVE
+  region: nyc3
+  image: ubuntu-24-04-x64
+  defaultSize: s-1vcpu-1gb
+  maxConcurrent: 3
+  idleTtlMinutes: 15
+  hardTtlMinutes: 240
+  destroyOnFinish: true
+  backups: false
+  snapshots: false
+  sshUser: root
+  sshKeyPath: ~/.codex/mecha-webui/transport_ed25519
+  sshPublicKeyPath: ~/.codex/mecha-webui/transport_ed25519.pub
+  sshKeyName: mecha-webui-transport
+
+security:
+  reaperGraceSeconds: 120
+  globalOrphanTtlMinutes: 30
+  reaperOrphanPolicy: report
+  denyHostMounts:
+    - /
+    - ~
+    - ~/.ssh
+    - ~/.codex
+    - ~/.config
+    - ~/.aws
+    - ~/.docker
+  allowRepoAssetMounts: true
