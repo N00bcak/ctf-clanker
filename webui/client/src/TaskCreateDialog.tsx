@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type CodexSettings, type Task } from "./api";
+import { api, type CodexModelOption, type CodexSettings, type Task } from "./api";
 import {
     DEFAULT_CODEX_SETTINGS,
     challengeToRequest,
@@ -28,6 +28,10 @@ export function TaskCreateDialog(props: {
     const [progress, setProgress] = useState<string>();
     const [warning, setWarning] = useState<string>();
     const [error, setError] = useState<string>();
+    const [models, setModels] = useState<CodexModelOption[]>([]);
+    const [modelCatalogSource, setModelCatalogSource] = useState<string>();
+    const [modelsLoading, setModelsLoading] = useState(false);
+    const [modelsError, setModelsError] = useState<string>();
     const nameRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
@@ -44,6 +48,32 @@ export function TaskCreateDialog(props: {
             window.removeEventListener("keydown", onKeyDown);
         };
     }, [props.open, progress, props.onClose]);
+
+    useEffect(() => {
+        if (!props.open) return;
+        let active = true;
+        setModelsLoading(true);
+        setModelsError(undefined);
+        api.codexModels()
+            .then((catalog) => {
+                if (active) {
+                    if (!Array.isArray(catalog.models)) throw new Error("Codex app-server returned an invalid model catalog");
+                    setModels(catalog.models);
+                    setModelCatalogSource(catalog.source === "local-runner-app-server"
+                        ? `local runner app-server${catalog.runtimeVersion ? ` ${catalog.runtimeVersion}` : ""}`
+                        : `host app-server fallback${catalog.runtimeVersion ? ` ${catalog.runtimeVersion}` : ""}`);
+                }
+            })
+            .catch((err) => {
+                if (active) setModelsError(err instanceof Error ? err.message : String(err));
+            })
+            .finally(() => {
+                if (active) setModelsLoading(false);
+            });
+        return () => {
+            active = false;
+        };
+    }, [props.open]);
 
     if (!props.open) return null;
 
@@ -111,11 +141,36 @@ export function TaskCreateDialog(props: {
         setSettings(normalizeCodexSettings({ ...settings, ...patch }));
     }
 
+    async function refreshModels() {
+        try {
+            setModelsLoading(true);
+            setModelsError(undefined);
+            const catalog = await api.codexModels();
+            if (!Array.isArray(catalog.models)) throw new Error("Codex app-server returned an invalid model catalog");
+            setModels(catalog.models);
+            setModelCatalogSource(catalog.source === "local-runner-app-server"
+                ? `local runner app-server${catalog.runtimeVersion ? ` ${catalog.runtimeVersion}` : ""}`
+                : `host app-server fallback${catalog.runtimeVersion ? ` ${catalog.runtimeVersion}` : ""}`);
+        } catch (err) {
+            setModelsError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setModelsLoading(false);
+        }
+    }
+
     function draftFromFiles(files: File[]) {
         setManifestFiles(files);
         setManifestText(JSON.stringify(draftManifest(files), null, 2));
         setBatchStatus(`Drafted ${files.length} file${files.length === 1 ? "" : "s"}.`);
     }
+
+    const defaultModel = models.find((model) => model.isDefault);
+    const selectedModel = models.find((model) => model.model === settings.model);
+    const sandboxHelp = settings.sandbox === "danger-full-access"
+        ? "Recommended for local CTF compatibility. The inner Codex sandbox is disabled; Docker is the execution boundary."
+        : settings.sandbox === "workspace-write"
+            ? "Adds an inner workspace sandbox. It can fail when Docker does not permit nested user namespaces."
+            : "Codex can inspect the task but cannot modify its workspace.";
 
     async function importBatch() {
         try {
@@ -162,12 +217,32 @@ export function TaskCreateDialog(props: {
                         <fieldset className="settings-panel">
                             <legend>Codex settings</legend>
                             <div className="field-grid two-column">
-                                <label className="field"><span>Model</span><input value={settings.model ?? ""} onChange={(event) => patchSettings({ model: event.target.value })} placeholder="Model" /></label>
-                                <label className="field"><span>Profile</span><input value={settings.profile ?? ""} onChange={(event) => patchSettings({ profile: event.target.value })} placeholder="Profile" /></label>
-                                <label className="field"><span>Sandbox</span><select value={settings.sandbox} onChange={(event) => patchSettings({ sandbox: event.target.value as CodexSettings["sandbox"] })}><option value="read-only">read-only</option><option value="workspace-write">workspace-write</option><option value="danger-full-access">danger-full-access</option></select></label>
-                                <label className="field"><span>Approvals</span><select value={settings.approvalPolicy} onChange={(event) => patchSettings({ approvalPolicy: event.target.value as CodexSettings["approvalPolicy"] })}><option value="untrusted">untrusted</option><option value="on-request">on-request</option><option value="never">never</option></select></label>
+                                <div className="field model-field">
+                                    <span>Model</span>
+                                    <div className="model-picker-row">
+                                        <select aria-label="Model" value={settings.model ?? ""} onChange={(event) => patchSettings({ model: event.target.value || undefined })}>
+                                            <option value="">Codex default{defaultModel ? ` — ${defaultModel.displayName}` : ""}</option>
+                                            {models.map((model) => <option key={model.model} value={model.model}>{model.displayName} · {model.model}</option>)}
+                                            {settings.model && !selectedModel && <option value={settings.model}>{settings.model} · unavailable in current catalog</option>}
+                                        </select>
+                                        <button className="icon-button model-refresh" type="button" aria-label="Refresh Codex models" onClick={refreshModels} disabled={modelsLoading}>↻</button>
+                                    </div>
+                                    <small className={modelsError ? "field-help field-help-error" : "field-help"}>
+                                        {modelsLoading ? "Querying the local runner app-server…" : modelsError ? `Discovery unavailable: ${modelsError}. Codex default remains usable.` : selectedModel?.description || `${models.length} models loaded live from the ${modelCatalogSource ?? "Codex app-server"}.`}
+                                    </small>
+                                </div>
+                                <label className="field"><span>Sandbox</span><select value={settings.sandbox} onChange={(event) => patchSettings({ sandbox: event.target.value as CodexSettings["sandbox"] })}><option value="danger-full-access">Docker boundary only · recommended for local CTF</option><option value="workspace-write">Inner workspace sandbox · compatibility varies</option><option value="read-only">Read only</option></select><small className="field-help">{sandboxHelp}</small></label>
+                                <label className="field"><span>Approvals</span><select value={settings.approvalPolicy} onChange={(event) => patchSettings({ approvalPolicy: event.target.value as CodexSettings["approvalPolicy"] })}><option value="never">never · non-interactive</option><option value="on-request">on-request</option><option value="untrusted">untrusted</option></select><small className="field-help">Tasks run unattended; “never” does not pause tool actions for confirmation.</small></label>
+                                <div className="profile-explainer">
+                                    <strong>What happened to Profile?</strong>
+                                    <span>A Codex profile is a named <code>$CODEX_HOME/&lt;name&gt;.config.toml</code> override layer. Isolated runners intentionally receive only task settings and authentication—not host profiles, MCP configuration, or profile-specific model catalogs.</span>
+                                </div>
                             </div>
                             <label className="checkbox-row"><input type="checkbox" checked={settings.webSearch} onChange={(event) => patchSettings({ webSearch: event.target.checked })} /> Enable web search</label>
+                            <div className="runtime-boundary-note">
+                                <strong>Docker safeguard summary</strong>
+                                <span>Capabilities are dropped, privilege escalation is blocked, resources are capped, and mounts are narrow. The default network is still open and task-local Codex authentication is readable inside the runner. This is a practical CTF baseline, not protection against suspected container escapes or hostile kernel payloads.</span>
+                            </div>
                         </fieldset>
                         <label className="file-drop"><span>Attach files</span><small>{attachments.length ? `${attachments.length} file${attachments.length === 1 ? "" : "s"} selected` : "Drop-in artifacts are copied into task storage"}</small><input aria-label="Attach files" type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} /></label>
                         <div className="dialog-actions"><button onClick={props.onClose} disabled={Boolean(progress)}>Cancel</button><button onClick={createDraft} disabled={Boolean(progress)}>Create Draft</button><button className="button-primary" onClick={createAndRun} disabled={Boolean(progress) || !prompt.trim()}>Create &amp; Run</button></div>

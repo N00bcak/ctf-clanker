@@ -18,6 +18,7 @@ import { SecretRedactor } from "./utils/redactor.js";
 import { HostCodexCliBridge } from "./codex/HostCodexCliBridge.js";
 import { CodexPtySessionManager, type CodexTerminalSessions } from "./codex/CodexPtySessionManager.js";
 import { CodexAppServerBridge } from "./codex/CodexAppServerBridge.js";
+import { CodexModelCatalog, type CodexModelCatalogReader } from "./codex/modelCatalog.js";
 import { registerTerminalRoutes } from "./terminal/terminalRouter.js";
 import type { CodexTask, CreateTaskInput, WebuiConfig, WorkStatus } from "./types.js";
 import type { RunnerProvider } from "./providers/Provider.js";
@@ -41,6 +42,7 @@ export interface BuildServerOptions {
     hostCodex?: HostCodexRunner;
     nativeCodex?: NativeCodexRunner;
     codexPty?: CodexTerminalSessions;
+    codexModels?: CodexModelCatalogReader;
 }
 
 function bodyToBuffer(body: unknown): Buffer {
@@ -79,6 +81,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
     ]);
     const codexPty = options.codexPty ?? new CodexPtySessionManager(config, redactor, events);
     const nativeCodex = options.nativeCodex ?? new CodexAppServerBridge(config, redactor, db);
+    const codexModels = options.codexModels ?? new CodexModelCatalog(config);
     const scheduler = new Scheduler(db, providers, config, events, redactor, (taskId) => nativeCodex.stop(taskId));
     const hostCodex = options.hostCodex ?? new HostCodexCliBridge(config, redactor);
     const reaper = new Reaper(db, config, scheduler);
@@ -118,6 +121,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
     });
 
     app.get("/api/tasks", async () => db.listTasks());
+
+    app.get("/api/codex/models", async () => codexModels.listModels());
 
     app.get("/api/tasks/:id", async (request) => {
         const { id } = request.params as { id: string };

@@ -170,7 +170,22 @@ async function harness(config = testConfig()): Promise<Harness> {
             }
         },
         codexPty,
-        nativeCodex
+        nativeCodex,
+        codexModels: {
+            async listModels() {
+                return {
+                    source: "local-runner-app-server",
+                    runtimeVersion: "0.144.5",
+                    queriedAt: "2026-07-26T00:00:00.000Z",
+                    models: [{
+                        model: "gpt-5.6-sol",
+                        displayName: "GPT-5.6 Sol",
+                        description: "Frontier coding model",
+                        isDefault: true
+                    }]
+                };
+            }
+        }
     });
     openApps.push(app);
     return { app, config, db, provider, codexPty, nativeCodex, hostPrompts };
@@ -225,6 +240,19 @@ describe("server routes", () => {
 
         expect(response.statusCode).toBe(400);
         expect(jsonBody<{ error: string }>(response)).toEqual({ error: "task not found" });
+    });
+
+    it("returns the live Codex app-server model catalog", async () => {
+        const { app } = await harness();
+        const response = await app.inject({ method: "GET", url: "/api/codex/models" });
+
+        expect(response.statusCode).toBe(200);
+        expect(jsonBody<{ models: Array<{ model: string; isDefault: boolean }> }>(response)).toEqual({
+            source: "local-runner-app-server",
+            runtimeVersion: "0.144.5",
+            queriedAt: "2026-07-26T00:00:00.000Z",
+            models: [{ model: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", description: "Frontier coding model", isDefault: true }]
+        });
     });
 
     it("returns the stored initial prompt for a task", async () => {

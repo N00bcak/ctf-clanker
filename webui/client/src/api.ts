@@ -42,6 +42,20 @@ export interface CodexSessionState {
     state: "not-started" | "active" | "closed";
 }
 
+export interface CodexModelOption {
+    model: string;
+    displayName: string;
+    description: string;
+    isDefault: boolean;
+}
+
+export interface CodexModelCatalog {
+    models: CodexModelOption[];
+    source: "local-runner-app-server" | "host-app-server-fallback";
+    runtimeVersion?: string;
+    queriedAt: string;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
         ...init,
@@ -59,6 +73,7 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
     tasks: () => json<Task[]>("/api/tasks"),
+    codexModels: () => json<CodexModelCatalog>("/api/codex/models"),
     createTask: (input: CreateTaskRequest) =>
         json<Task>("/api/tasks", {
             method: "POST",

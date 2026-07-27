@@ -15,6 +15,19 @@ npm run dev
 The server binds to `127.0.0.1:8787` by default. Non-loopback hosts require
 token auth unless `WEBUI_UNSAFE_ALLOW_NO_AUTH=1` is set.
 
+When the New Task dialog opens, the server starts `codex app-server` from the
+configured local runner image, queries its `model/list` catalog, and presents
+the result as a dropdown. This keeps model discovery aligned with the runtime
+that will execute local tasks. If the runner image is unavailable, the server
+may use the host app-server as a visibly labeled fallback. Leaving the selection
+on **Codex default** omits the model override so Codex chooses its current
+default.
+
+Codex profiles are not imported into isolated tasks. A profile is a named
+`$CODEX_HOME/<name>.config.toml` configuration layer and may contain broader
+settings such as MCP servers or model-catalog overrides. The runner receives
+only explicit task settings plus its task-local authentication copy.
+
 ## Security Model
 
 Prompt instructions are not a security boundary. Isolation comes from the task
@@ -31,6 +44,13 @@ Default behavior:
 - network: `open` with an explicit warning
 - Codex credential mode: `codex-auth-json`
 - Codex home retention: `purge-after-run`
+
+For ordinary CTF artifact analysis, the local Docker configuration is a useful
+baseline: Linux capabilities are dropped, privilege escalation is disabled,
+resources are capped, mounts are narrow, and the Docker socket is not exposed.
+It is not the right boundary for suspected container escapes, hostile kernel
+payloads, or untrusted malware. Those should run in a disposable VM with
+disposable credentials and a stricter network policy.
 
 The task workspace is always `webui/cache/<task_id>/storage/`. Inside Docker,
 that same workspace is mounted at `/workspace`.

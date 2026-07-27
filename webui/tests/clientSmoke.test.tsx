@@ -104,10 +104,26 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 function mockFetch(handler: (url: string, init?: RequestInit) => unknown): void {
-    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => ({
-        ok: true,
-        json: async () => handler(String(url), init)
-    })));
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url) === "/api/codex/models") {
+            return {
+                ok: true,
+                json: async () => ({
+                    source: "local-runner-app-server",
+                    runtimeVersion: "0.144.5",
+                    queriedAt: new Date().toISOString(),
+                    models: [
+                        { model: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", description: "Frontier coding model", isDefault: true },
+                        { model: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", description: "Fast coding model", isDefault: false }
+                    ]
+                })
+            };
+        }
+        return {
+            ok: true,
+            json: async () => handler(String(url), init)
+        };
+    }));
 }
 
 describe("client smoke tests", () => {
@@ -229,7 +245,8 @@ describe("client smoke tests", () => {
         const { container } = render(<TaskCreateDialog open onClose={vi.fn()} onCreated={onCreated} onSelect={vi.fn()} />);
         fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Uploaded" } });
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Solve this" } });
-        fireEvent.change(screen.getByPlaceholderText("Profile"), { target: { value: "ctf" } });
+        await screen.findByRole("option", { name: "GPT-5.6 Sol · gpt-5.6-sol" });
+        fireEvent.change(screen.getByLabelText("Model"), { target: { value: "gpt-5.6-sol" } });
         fireEvent.change(container.querySelector("input[type='file']")!, {
             target: { files: [new File(["flag"], "flag.txt")] }
         });
@@ -240,7 +257,7 @@ describe("client smoke tests", () => {
             name: "Uploaded",
             prompt: "Solve this",
             backend: "local",
-            codexSettings: { model: "gpt-5.5", profile: "ctf", sandbox: "workspace-write", approvalPolicy: "never", webSearch: false },
+            codexSettings: { model: "gpt-5.6-sol", sandbox: "danger-full-access", approvalPolicy: "never", webSearch: false },
             attachments: [{ path: "attachments/flag.txt", contentBase64: "ZmxhZw==" }]
         });
     });
@@ -268,7 +285,7 @@ describe("client smoke tests", () => {
         expect(requests[0]).toMatchObject({
             name: "pwn-001",
             backend: "local",
-            codexSettings: { model: "gpt-5.5", sandbox: "workspace-write", approvalPolicy: "never", webSearch: false },
+            codexSettings: { sandbox: "danger-full-access", approvalPolicy: "never", webSearch: false },
             attachments: [{ path: "attachments/pwn-001/chal.py", contentBase64: "cHJpbnQoMSk=" }]
         });
     });
@@ -313,6 +330,19 @@ describe("client smoke tests", () => {
         render(<TaskView task={task()} onChanged={vi.fn()} />);
         expect(screen.getByRole("tab", { name: "Codex" }).getAttribute("aria-selected")).toBe("true");
         expect(screen.getByRole("tab", { name: "Files" }).getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("loads live Codex models and explains profiles and the Docker boundary", async () => {
+        mockFetch(() => task());
+        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
+
+        expect(await screen.findByRole("option", { name: "GPT-5.6 Sol · gpt-5.6-sol" })).toBeTruthy();
+        expect(screen.getByRole("option", { name: "Codex default — GPT-5.6 Sol" })).toBeTruthy();
+        expect(screen.getByText(/local runner app-server 0.144.5/)).toBeTruthy();
+        expect(screen.getByText("What happened to Profile?")).toBeTruthy();
+        expect(screen.getByText("$CODEX_HOME/<name>.config.toml")).toBeTruthy();
+        expect(screen.getByText(/practical CTF baseline, not protection against suspected container escapes/i)).toBeTruthy();
+        expect(screen.queryByPlaceholderText("Profile")).toBeNull();
     });
 
     it("renders TaskView native and host-mode warnings", () => {

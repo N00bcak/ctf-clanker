@@ -1,8 +1,8 @@
 import type { CodexSettings, CodexSandbox, WebuiConfig } from "../types.js";
 
 export const DEFAULT_CODEX_SETTINGS: CodexSettings = {
-    model: "gpt-5.5",
-    sandbox: "workspace-write",
+    model: undefined,
+    sandbox: "danger-full-access",
     approvalPolicy: "never",
     webSearch: false
 };

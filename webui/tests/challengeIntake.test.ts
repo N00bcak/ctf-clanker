@@ -20,11 +20,11 @@ function namedFile(name: string, content: string, relativePath?: string): File {
 }
 
 describe("challenge intake helpers", () => {
-    it("normalizes Codex settings with gpt-5.5 defaults", () => {
+    it("normalizes Codex settings while leaving model selection to Codex", () => {
         expect(normalizeCodexSettings({})).toEqual({
-            model: "gpt-5.5",
+            model: undefined,
             profile: undefined,
-            sandbox: "workspace-write",
+            sandbox: "danger-full-access",
             approvalPolicy: "never",
             webSearch: false
         });
@@ -64,7 +64,7 @@ describe("challenge intake helpers", () => {
             name: "pwn-001",
             prompt: "Solve it",
             backend: "local",
-            codexSettings: { model: "gpt-5.5", sandbox: "workspace-write", approvalPolicy: "never", webSearch: false },
+            codexSettings: { model: "gpt-5.5", sandbox: "danger-full-access", approvalPolicy: "never", webSearch: false },
             attachments: [{ path: "challenge/chal.py" }]
         });
         expect(request.attachments?.[0].contentBase64).toBe("cHJpbnQoMSk=");
