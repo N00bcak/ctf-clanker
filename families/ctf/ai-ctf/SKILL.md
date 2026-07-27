@@ -21,9 +21,8 @@ extraction, data poisoning, and AI-specific logic flaws.
 
 ## Do Not Use
 
-- The challenge is a pure ML modeling task (training, tuning) — defer to
-  ML family skills (`dataset-triage`, `classical-ml-baseline`,
-  `deep-learning-experiment`) when they are fully authored.
+- The challenge is a pure AI modeling task — use the applicable AI family
+  skill.
 - The challenge is a standard web app without AI components — use `web-ctf`.
 - The category is unknown — use `ctf-triage` first.
 - Do not spawn, request, or rely on subagents.
@@ -90,19 +89,19 @@ confidence scores, error behavior.
 
 Run the attack, verify the flag or objective, document the approach.
 
-## ML Family Hook
+## AI Family Hook
 
-For challenges requiring actual ML work (training models, tuning
-hyperparameters, feature engineering) rather than attacking ML systems,
-the ML family skills provide the modeling methodology:
+For work that builds or evaluates an AI solution rather than attacking one,
+use the narrow applicable leaf:
 
-- `dataset-triage` — data quality, splits, leakage detection
-- `classical-ml-baseline` — tabular/structured data modeling
-- `deep-learning-experiment` — neural network training
+- `ai-data-preparation` — raw data quality, semantics, and packaging
+- `ai-insight-development` — patterns, structure, labels, and constraints
+- `ai-representation-workbench` — features, states, knowledge, or heuristics
+- `ai-problem-modeling` — statistical, neural, symbolic, search, or hybrid design
+- `ai-performance` — construction, training, search, and evaluation
 
-These are currently stubs. Until fully authored, handle the ML modeling
-portion of an AI CTF within this skill using standard Python ML tooling
-(sklearn, PyTorch, TensorFlow). Leave pure modeling tasks to native Codex.
+Use the explicit-only `ai-pipeline` only when the user asks for a one-time
+end-to-end framing interview.
 
 ## Pivot Rules
 
