@@ -1,9 +1,6 @@
 ---
 name: ai-ctf
-description: >-
-  Exploit AI/ML systems in CTF challenges: prompt injection, adversarial
-  examples, model extraction, data poisoning, LLM jailbreaks. Hooks into
-  the ML family for modeling tasks. Does not use subagents.
+description: Exploit prompt injection, adversarial ML, model extraction, poisoning, or jailbreak weaknesses in AI CTFs.
 ---
 
 # AI CTF

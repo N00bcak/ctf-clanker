@@ -1,9 +1,6 @@
 ---
 name: pwn-ctf
-description: >-
-  Exploit binary vulnerabilities in CTF challenges: stack overflow, heap,
-  format string, ROP, kernel, sandbox escape. Covers exploit development
-  from crash to reliable remote shell. Does not use subagents.
+description: Exploit memory-corruption, heap, format-string, ROP, kernel, or sandbox vulnerabilities in CTF challenges.
 ---
 
 # Pwn CTF

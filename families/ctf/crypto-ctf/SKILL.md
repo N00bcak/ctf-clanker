@@ -1,9 +1,6 @@
 ---
 name: crypto-ctf
-description: >-
-  Analyze and break cryptographic schemes in CTF challenges: RSA, ECC,
-  symmetric ciphers, classical ciphers, PRNG, hashes. Uses mechanism-property
-  analysis to identify weaknesses. Does not use subagents.
+description: Break weak cryptographic, hashing, or PRNG schemes in CTF challenges.
 ---
 
 # Crypto CTF

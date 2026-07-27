@@ -1,9 +1,6 @@
 ---
 name: ctf-triage
-description: >-
-  Classify a CTF challenge by inspecting real artifacts, identify the primary
-  attack domain, and route to the right specialist leaf. Does not solve;
-  does not use subagents.
+description: Inspect unknown-category CTF artifacts to identify the category and specialist handoff.
 ---
 
 # CTF Triage

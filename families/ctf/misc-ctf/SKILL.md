@@ -1,9 +1,6 @@
 ---
 name: misc-ctf
-description: >-
-  Handle miscellaneous CTF challenges: Python and bash jail escapes,
-  encoding puzzles, esoteric languages, OSINT, hardware signals, and
-  challenges that do not fit a specific category. Does not use subagents.
+description: Solve CTF jails, encoding puzzles, esoteric languages, OSINT, hardware, or uncategorized challenges.
 ---
 
 # Misc CTF

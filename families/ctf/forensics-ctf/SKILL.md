@@ -1,9 +1,6 @@
 ---
 name: forensics-ctf
-description: >-
-  Analyze digital forensic artifacts in CTF challenges: network captures,
-  disk images, memory dumps, steganography, log analysis. Systematic
-  artifact-native investigation. Does not use subagents.
+description: Recover evidence or hidden data from CTF network, disk, memory, steganographic, or log artifacts.
 ---
 
 # Forensics CTF

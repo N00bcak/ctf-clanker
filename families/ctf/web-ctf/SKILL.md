@@ -1,9 +1,6 @@
 ---
 name: web-ctf
-description: >-
-  Exploit web application vulnerabilities in CTF challenges: injection,
-  auth bypass, client-side attacks, deserialization, SSRF. Evidence-first
-  recon before exploitation. Does not use subagents.
+description: Exploit injection, authentication, client-side, deserialization, or SSRF flaws in CTF web applications.
 ---
 
 # Web CTF

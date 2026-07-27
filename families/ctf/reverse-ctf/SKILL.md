@@ -1,9 +1,6 @@
 ---
 name: reverse-ctf
-description: >-
-  Analyze reverse engineering CTF challenges: recover validation logic,
-  reconstruct constraints, and produce solvers. Covers ELF, PE, bytecode,
-  custom VMs, APKs, WASM, and obfuscated binaries. Does not use subagents.
+description: Recover logic and constraints from CTF binaries, bytecode, VMs, APKs, WASM, or obfuscated programs.
 ---
 
 # Reverse CTF
