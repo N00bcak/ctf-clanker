@@ -101,8 +101,8 @@ the ML family skills provide the modeling methodology:
 - `deep-learning-experiment` — neural network training
 
 These are currently stubs. Until fully authored, handle the ML modeling
-portion within this skill using standard Python ML tooling (sklearn,
-PyTorch, TensorFlow) and defer to `task-clarifier` for pure modeling tasks.
+portion of an AI CTF within this skill using standard Python ML tooling
+(sklearn, PyTorch, TensorFlow). Leave pure modeling tasks to native Codex.
 
 ## Pivot Rules
 
