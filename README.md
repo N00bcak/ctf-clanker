@@ -21,23 +21,26 @@ Requirements:
 - Docker for local isolated tasks
 - Codex authentication at `~/.codex/auth.json` for native local runs
 
-Install and verify:
+Install the dependencies and build the local runner:
 
 ```bash
-npm --prefix webui ci
-npm --prefix webui test
-npm --prefix webui run build
-npm --prefix webui run runner:build
+./setup.sh
+```
+
+Run the unit, production-build, and live Docker checks:
+
+```bash
+./test.sh
 ```
 
 Run the WebUI:
 
 ```bash
-npm --prefix webui run dev
+./run.sh
 ```
 
 Open <http://127.0.0.1:8787>. The local runner mounts `families/ctf/`
-read-only as the task's Codex skills.
+read-only at Codex's container-level `/etc/codex/skills` location.
 
 DigitalOcean remains dry-run by default. Live cloud calls require the explicit
 configuration and environment guards documented in `webui/README.md`.

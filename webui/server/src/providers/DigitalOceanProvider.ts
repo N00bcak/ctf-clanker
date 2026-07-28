@@ -69,7 +69,7 @@ export function digitalOceanDropletPayload(task: CodexTask, config: WebuiConfig,
             "  - nodejs",
             "  - npm",
             "runcmd:",
-            "  - mkdir -p /workspace /root/.codex/skills",
+            "  - mkdir -p /workspace /etc/codex/skills",
             "  - chmod 700 /root/.codex",
             "  - npm install -g @openai/codex"
         ].join("\n")
@@ -148,11 +148,11 @@ export class DigitalOceanProvider implements RunnerProvider {
         handle.sshHost = host;
         await this.waitForSsh(host);
         await this.verifyDropletMetadata(host, String(created.droplet.id));
-        await this.remoteExec(host, "mkdir -p /workspace /root/.codex/skills && chmod 700 /root/.codex");
+        await this.remoteExec(host, "mkdir -p /workspace /etc/codex/skills && chmod 700 /root/.codex");
         await this.scpDirectory(path.join(task.storagePath, "."), `${this.config.cloud.sshUser}@${host}:/workspace/`);
-        await this.scpDirectory(path.join(REPO_ROOT, "families", "ctf", "."), `${this.config.cloud.sshUser}@${host}:/root/.codex/skills/`);
+        await this.scpDirectory(path.join(REPO_ROOT, "families", "ctf", "."), `${this.config.cloud.sshUser}@${host}:/etc/codex/skills/`);
         await this.scpFile(path.join(task.codexHomePath, "auth.json"), `${this.config.cloud.sshUser}@${host}:/root/.codex/auth.json`);
-        await this.remoteExec(host, "chmod 600 /root/.codex/auth.json && chmod -R a-w /root/.codex/skills");
+        await this.remoteExec(host, "chmod 600 /root/.codex/auth.json && chmod -R a-w /etc/codex/skills");
     }
 
     private async ensureSshKey(): Promise<DigitalOceanSshKey> {

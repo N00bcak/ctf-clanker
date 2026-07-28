@@ -36,7 +36,7 @@ You are operating inside an isolated task workspace.
 
 Workspace:
 - Primary writable workspace: /workspace
-- CTF skills: /root/.codex/skills, read-only
+- CTF skills: /etc/codex/skills, read-only
 - Attached files: /workspace/attachments
 
 Rules:

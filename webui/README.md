@@ -39,7 +39,7 @@ Default behavior:
 - task cache: `webui/cache/<task_id>/`
 - writable workspace: `webui/cache/<task_id>/storage/`
 - runner workspace: `/workspace`
-- CTF skills: `families/ctf/`, mounted read-only at `/root/.codex/skills`
+- CTF skills: `families/ctf/`, mounted read-only at `/etc/codex/skills`
 - network: `open` with an explicit warning
 - Codex credential mode: `codex-auth-json`
 - Codex home retention: `purge-after-run`

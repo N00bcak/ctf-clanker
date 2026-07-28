@@ -517,7 +517,7 @@ Default local container behavior:
 ```text
 /workspace                    rw  from webui/cache/<task_id>/storage
 /root/.codex                  rw  from webui/cache/<task_id>/codex-home  # secret-bearing; scrub per retention policy
-/root/.codex/skills           ro  from repo families/ctf/
+/etc/codex/skills             ro  from repo families/ctf/
 ```
 
 If generated task skill indexes or wrappers are needed, create them as ordinary files inside `storage/` before container start. Do not add a separate `ro/rw` mount under `/workspace`; `/workspace` is already the task's writable workspace.

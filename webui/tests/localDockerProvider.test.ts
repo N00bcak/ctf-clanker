@@ -39,8 +39,8 @@ describe("LocalDockerProvider", () => {
         });
 
         const args = vi.mocked(docker).mock.calls[0]?.[0] ?? [];
-        const skillMount = args.find((arg) => arg.endsWith(":/root/.codex/skills:ro"));
-        expect(skillMount).toMatch(/families[/\\]ctf:\/root\/\.codex\/skills:ro$/);
+        const skillMount = args.find((arg) => arg.endsWith(":/etc/codex/skills:ro"));
+        expect(skillMount).toMatch(/families[/\\]ctf:\/etc\/codex\/skills:ro$/);
         expect(args.some((arg) => arg.includes("/mecha/"))).toBe(false);
     });
 
