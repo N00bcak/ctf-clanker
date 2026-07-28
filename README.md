@@ -1,7 +1,7 @@
 # CTF Clanker
 
-CTF Clanker combines eight CTF-solving Codex skills with a WebUI for isolated
-local Docker and guarded DigitalOcean tasks.
+CTF Clanker provides a WebUI to solve CTF challenges autonomously with.
+Its principal advantage is the ability to deploy completely locally, but also supports DigitalOcean for cloud-based runs. 
 
 ## Layout
 
@@ -39,7 +39,8 @@ Run the WebUI:
 ./run.sh
 ```
 
-Open <http://127.0.0.1:8787>. The local runner mounts `families/ctf/`
+Open the URL printed by `npm` (it defaults to `http://127.0.0.1:8787`, 
+since this is a local instance). The local runner mounts `families/ctf/`
 read-only at Codex's container-level `/etc/codex/skills` location.
 
 DigitalOcean remains dry-run by default. Live cloud calls require the explicit
