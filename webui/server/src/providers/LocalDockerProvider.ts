@@ -70,11 +70,7 @@ export class LocalDockerProvider implements RunnerProvider {
             "-v",
             `${task.codexHomePath}:/root/.codex:rw`,
             "-v",
-            `${path.join(REPO_ROOT, "shared")}:/mecha/shared:ro`,
-            "-v",
-            `${path.join(REPO_ROOT, "templates")}:/mecha/templates:ro`,
-            "-v",
-            `${path.join(REPO_ROOT, "families")}:/mecha/families:ro`
+            `${path.join(REPO_ROOT, "families", "ctf")}:/root/.codex/skills:ro`
         );
         for (const mount of permissions.mounts) {
             args.push("-v", `${mount.source}:${mount.target}:${mount.mode.includes("w") ? "rw" : "ro"}`);

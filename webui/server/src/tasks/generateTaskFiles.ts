@@ -36,7 +36,7 @@ You are operating inside an isolated task workspace.
 
 Workspace:
 - Primary writable workspace: /workspace
-- Shared mecha-suit assets: /mecha, read-only
+- CTF skills: /root/.codex/skills, read-only
 - Attached files: /workspace/attachments
 
 Rules:

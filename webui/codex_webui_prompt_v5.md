@@ -15,7 +15,7 @@ A Codex task is a fresh task environment containing:
 - generated task-specific instructions;
 - the user's initial prompt;
 - optional attached files;
-- access to mecha-suit shared skills/templates/families as read-only assets;
+- access to the repository's CTF skills as read-only Codex skills;
 - an isolated writable workspace;
 - a Codex process running inside the task environment;
 - a steering window for follow-up instructions;
@@ -517,9 +517,7 @@ Default local container behavior:
 ```text
 /workspace                    rw  from webui/cache/<task_id>/storage
 /root/.codex                  rw  from webui/cache/<task_id>/codex-home  # secret-bearing; scrub per retention policy
-/mecha/shared                 ro  from repo shared/
-/mecha/templates              ro  from repo templates/
-/mecha/families               ro  from repo families/
+/root/.codex/skills           ro  from repo families/ctf/
 ```
 
 If generated task skill indexes or wrappers are needed, create them as ordinary files inside `storage/` before container start. Do not add a separate `ro/rw` mount under `/workspace`; `/workspace` is already the task's writable workspace.
