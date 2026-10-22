@@ -10,6 +10,7 @@ import type {
     ProvisioningPlan,
     RunnerHandle,
     TaskStatus,
+    TaskSource,
     WorkStatus,
     WebuiConfig
 } from "./types.js";
@@ -123,6 +124,12 @@ export class WebuiDatabase {
                 network_enforcement TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS task_sources (
+                source_key TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS executions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -220,6 +227,19 @@ export class WebuiDatabase {
     getTask(id: string): CodexTask | undefined {
         const row = this.db.prepare("SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error, (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order FROM tasks WHERE id = ?").get(id) as Row | undefined;
         return row ? taskFromRow(row) : undefined;
+    }
+
+    getTaskBySource(source: TaskSource): { task: CodexTask; contentHash: string } | undefined {
+        const key = JSON.stringify([source.platform, source.competition, source.account, source.challengeId]);
+        const row = this.db.prepare("SELECT task_id, content_hash FROM task_sources WHERE source_key = ?").get(key) as Row | undefined;
+        if (!row) return undefined;
+        return { task: this.getTask(String(row.task_id))!, contentHash: String(row.content_hash) };
+    }
+
+    insertTaskSource(source: TaskSource, taskId: string): void {
+        const key = JSON.stringify([source.platform, source.competition, source.account, source.challengeId]);
+        this.db.prepare("INSERT INTO task_sources (source_key, content_hash, task_id) VALUES (?, ?, ?)")
+            .run(key, source.contentHash, taskId);
     }
 
     deleteTask(id: string): void {

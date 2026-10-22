@@ -145,3 +145,37 @@ With dry-run disabled, disabling new starts still permits cleanup of recorded
 resources. Dry-run itself prohibits live cleanup and preserves the resource
 record. Destroy deletes a recorded resource without depending on SSH or file
 collection; an already absent droplet counts as successfully deleted.
+
+## CTFd import
+
+The host-side `ctfd-import` skill uses Playwright to collect authenticated CTFd
+challenges and upload one draft task per challenge. See
+[`../families/ctf/ctfd-import/SKILL.md`](../families/ctf/ctfd-import/SKILL.md)
+for the workflow and command reference. Install Chromium once with
+`npm exec -- playwright install chromium`, then use `npm run ctfd:import -- --help`.
+Browser profiles remain outside task containers; the runner image is unchanged.
+
+`POST /api/tasks` still accepts JSON. It also accepts multipart with one `task`
+JSON field (without inline attachments) and binary file parts named by their
+workspace paths, e.g. `attachments/7/handout.zip`. Multipart paths use ASCII
+letters, numbers, `_`, `-`, `.`, and `/`, without empty or traversal segments.
+The existing attachment quotas apply; task metadata is limited to 1 MiB.
+
+Both intake formats accept optional `source`:
+`{ platform: "ctfd", competition, account, challengeId, contentHash }`.
+`competition` is a base HTTP(S) URL without credentials/query/fragment;
+`account` is a stable team/user scope; `challengeId` is a decimal string;
+`contentHash` is a lowercase SHA-256 digest of the imported content.
+An additive SQLite `task_sources` table preserves identities across restarts.
+Creation returns 201; identical-source retries return the existing task with 200;
+changed content returns 409. Existing JSON clients and tasks remain compatible.
+Start drafts separately with `POST /api/tasks/:id/start`.
+
+Browser fixture checks require installed Chromium:
+`CTFD_BROWSER_TEST=1 npm test -- --run tests/ctfdImport.test.ts`.
+For real-platform verification, seed a disposable CTFd 3.8.1 checkout using
+`tests/fixtures/ctfd_import.py` (its pinned Python requirements must be installed,
+and the CTFd checkout must be on `PYTHONPATH`), then set
+`CTFD_TEST_URL=http://127.0.0.1:18787` for that same test command. The real-platform
+test exercises login, protected attachments, deduplication, and queue execution
+using a fake solver; it does not spend model credits or provision cloud resources.

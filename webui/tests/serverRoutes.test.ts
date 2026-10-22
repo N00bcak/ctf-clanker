@@ -560,3 +560,68 @@ describe("server routes", () => {
         expect(codexLog).not.toContain("shell-only output");
     });
 });
+
+describe("CTFd task intake", () => {
+    const source = { platform: "ctfd", competition: "https://ctf.example/event/", account: "team:42", challengeId: "7", contentHash: "a".repeat(64) };
+    async function upload(app: FastifyInstance, fields: Array<[string, string | Blob]>) {
+        const form = new FormData();
+        for (const [name, value] of fields) form.append(name, value);
+        const request = new Request("http://localhost/api/tasks", { method: "POST", body: form });
+        return app.inject({ method: "POST", url: "/api/tasks", headers: { "content-type": request.headers.get("content-type")! }, payload: Buffer.from(await request.arrayBuffer()) });
+    }
+
+    it("persists source deduplication, preserves changed tasks, and separates accounts", async () => {
+        const h = await harness();
+        const task = await createTask(h.app, { prompt: "original", source });
+        const repeated = await h.app.inject({ method: "POST", url: "/api/tasks", payload: { prompt: "original", source: { ...source, competition: "https://ctf.example/event" } } });
+        expect(repeated.statusCode).toBe(200);
+        expect(repeated.json().id).toBe(task.id);
+        const reopened = new WebuiDatabase(h.config);
+        expect(reopened.getTaskBySource({ ...source, platform: "ctfd", competition: "https://ctf.example/event" })?.task.id).toBe(task.id);
+        reopened.db.close();
+        const changed = await h.app.inject({ method: "POST", url: "/api/tasks", payload: { prompt: "changed", source: { ...source, contentHash: "b".repeat(64) } } });
+        expect(changed.statusCode).toBe(409);
+        expect(fs.readFileSync(task.initialPromptPath, "utf8")).toBe("original");
+        await createTask(h.app, { source: { ...source, account: "team:43" } });
+        expect(h.db.listTasks()).toHaveLength(2);
+        expect(h.provider.provisioned).toBe(0);
+    });
+
+    it("accepts multipart bytes, preserves source identity, and queues on explicit start", async () => {
+        const h = await harness();
+        const response = await upload(h.app, [["task", JSON.stringify({ prompt: "solve", source })], ["attachments/7/file.bin", new Blob([new Uint8Array([0, 255, 1, 2])])]]);
+        expect(response.statusCode).toBe(201);
+        const task = response.json<CodexTask>();
+        expect(fs.readFileSync(path.join(task.storagePath, "attachments/7/file.bin"))).toEqual(Buffer.from([0, 255, 1, 2]));
+        expect(task.status).toBe("draft");
+        expect(h.provider.provisioned).toBe(0);
+        const start = await h.app.inject({ method: "POST", url: `/api/tasks/${task.id}/start`, payload: {} });
+        expect(start.statusCode).toBe(202);
+        await vi.waitFor(() => expect(h.nativeCodex.prompts).toHaveLength(1));
+    });
+
+    it("accepts files beyond the JSON body limit within configured quotas", async () => {
+        const config = testConfig();
+        config.limits.attachments = { maxFiles: 2, maxFileBytes: 2 * 1024 * 1024, maxTotalBytes: 3 * 1024 * 1024 };
+        const h = await harness(config);
+        const response = await upload(h.app, [["task", JSON.stringify({ prompt: "large" })], ["attachments/file.bin", new Blob([Buffer.alloc(1100000, 42)])]]);
+        expect(response.statusCode).toBe(201);
+        expect(fs.statSync(path.join(response.json().storagePath, "attachments/file.bin")).size).toBe(1100000);
+    });
+
+    it("rejects excessive, duplicate, and escaping multipart attachments before task creation", async () => {
+        const h = await harness();
+        const field: [string, string] = ["task", JSON.stringify({ prompt: "solve" })];
+        for (const files of [
+            [["attachments/x", new Blob(["123456789"])]],
+            [["attachments/x", new Blob(["12345678"])], ["attachments/y", new Blob(["12345678"])]],
+            [["attachments/x", new Blob(["a"])], ["attachments/x", new Blob(["b"])]],
+            [["attachments/../AGENTS.md", new Blob(["a"])]],
+            [["attachments/x", new Blob(["a"])], ["attachments/y", new Blob(["a"])], ["attachments/z", new Blob(["a"])]]
+        ] as Array<Array<[string, Blob]>>) {
+            const response = await upload(h.app, [field, ...files]);
+            expect(response.statusCode).toBeGreaterThanOrEqual(400);
+        }
+        expect(h.db.listTasks()).toHaveLength(0);
+    });
+});

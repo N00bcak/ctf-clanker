@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import type { CodexTask, CreateTaskInput, WebuiConfig } from "../types.js";
+import type { CodexTask, CreateTaskInput, TaskSource, WebuiConfig } from "../types.js";
 import { resolveFromRepoRoot } from "../config.js";
 import { WebuiDatabase } from "../db.js";
 import { enforceAttachmentLimits, enforceTaskQuota } from "../utils/quota.js";
@@ -38,10 +38,26 @@ function codexRuntimeFor(input: CreateTaskInput, config: WebuiConfig): Pick<Code
     throw new Error(`Unsupported Codex credential mode: ${String(config.codex.credentialMode)}`);
 }
 
+export function normalizeTaskSource(source: TaskSource | undefined): TaskSource | undefined {
+    if (source === undefined) return undefined;
+    if (!source || source.platform !== "ctfd" || typeof source.competition !== "string"
+        || typeof source.account !== "string" || !source.account.trim() || source.account.length > 256
+        || typeof source.challengeId !== "string" || !/^\d+$/.test(source.challengeId)
+        || typeof source.contentHash !== "string" || !/^[a-f0-9]{64}$/.test(source.contentHash)) {
+        throw new Error("invalid CTFd source identity");
+    }
+    const url = new URL(source.competition);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new Error("competition must be an HTTP(S) base URL without credentials, query or fragment");
+    }
+    return { ...source, competition: url.href.replace(/\/+$/, ""), account: source.account.trim() };
+}
+
 export function createTask(input: CreateTaskInput, config: WebuiConfig, db: WebuiDatabase): CodexTask {
     if (!input.prompt || input.prompt.trim().length === 0) {
         throw new Error("prompt is required");
     }
+    const source = normalizeTaskSource(input.source);
     const attachments = input.attachments ?? [];
     const codexSettings = normalizeCodexSettings(input.codexSettings);
     enforceAttachmentLimits(attachments, config);
@@ -65,6 +81,7 @@ export function createTask(input: CreateTaskInput, config: WebuiConfig, db: Webu
         outputPath: paths.outputPath,
         providerSpec: {
             backend: input.backend ?? "local",
+            ...(source ? { source } : {}),
             ...(codexSettings ? { codexSettings } : {})
         },
         idleTtlMinutes: config.cloud.idleTtlMinutes,
@@ -78,10 +95,20 @@ export function createTask(input: CreateTaskInput, config: WebuiConfig, db: Webu
     };
 
     return db.withTransaction(() => {
+        if (source) {
+            const existing = db.getTaskBySource(source);
+            if (existing) {
+                if (existing.contentHash !== source.contentHash) {
+                    throw Object.assign(new Error(`source content changed; existing task ${existing.task.id} was preserved`), { statusCode: 409 });
+                }
+                return existing.task;
+            }
+        }
         try {
             generateTaskFiles(task, { ...input, attachments }, config, cacheDir);
             enforceTaskQuota(path.dirname(task.storagePath), config);
             db.insertTask(task);
+            if (source) db.insertTaskSource(source, task.id);
             return task;
         } catch (error) {
             fs.rmSync(paths.taskRoot, { recursive: true, force: true });

@@ -70,6 +70,12 @@ describe("challenge intake helpers", () => {
         expect(request.attachments?.[0].contentBase64).toBe("cHJpbnQoMSk=");
     });
 
+    it("preserves CTFd source identity through manual manifest import", async () => {
+        const source = { platform: "ctfd", competition: "https://ctf.example", account: "team:42", challengeId: "7", contentHash: "a".repeat(64) };
+        const manifest = validateManifest({ version: 1, challenges: [{ name: "CTFd", prompt: "solve", source }] });
+        expect((await challengeToRequest(manifest, manifest.challenges[0], [])).source).toEqual(source);
+    });
+
     it("encodes ad-hoc attachments for single task creation", async () => {
         const attachments = await filesToAttachments([namedFile("flag.txt", "flag")]);
 

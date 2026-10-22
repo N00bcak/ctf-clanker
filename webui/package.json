@@ -11,7 +11,8 @@
         "test:coverage": "vitest run --config vitest.config.ts --coverage",
         "test:watch": "vitest --config vitest.config.ts",
         "runner:build": "docker build -t mecha-codex-runner:base -f runner/Dockerfile runner",
-        "runner:shell": "docker run --rm -it -v \"$PWD/cache:/workspace\" -w /workspace mecha-codex-runner:base /bin/bash"
+        "runner:shell": "docker run --rm -it -v \"$PWD/cache:/workspace\" -w /workspace mecha-codex-runner:base /bin/bash",
+        "ctfd:import": "tsx scripts/ctfd-import.ts"
     },
     "dependencies": {
         "@fastify/multipart": "^9.0.3",
@@ -33,6 +34,7 @@
         "@vitejs/plugin-react": "^4.3.4",
         "@vitest/coverage-v8": "^3.0.5",
         "jsdom": "^29.1.1",
+        "playwright": "^1.64.1",
         "tsx": "^4.19.3",
         "typescript": "^5.7.3",
         "vite": "^6.1.1",

@@ -13,6 +13,7 @@ export interface ManifestAttachment {
 }
 
 export interface ManifestChallenge {
+    source?: CreateTaskRequest["source"];
     name: string;
     prompt: string;
     backend?: Backend;
@@ -106,6 +107,7 @@ export async function challengeToRequest(
 ): Promise<CreateTaskRequest> {
     const fileMap = new Map(files.map((file) => [fileSource(file), file]));
     return {
+        source: challenge.source,
         name: challenge.name,
         prompt: challenge.prompt,
         backend: challenge.backend ?? manifest.defaults?.backend ?? "local",

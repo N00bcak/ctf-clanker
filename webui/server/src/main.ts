@@ -6,7 +6,8 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { loadConfig, WEBUI_ROOT } from "./config.js";
 import { WebuiDatabase } from "./db.js";
-import { createTask } from "./tasks/createTask.js";
+import { readTaskInput } from "./tasks/readTaskInput.js";
+import { createTask, normalizeTaskSource } from "./tasks/createTask.js";
 import { deleteFile, listFiles, readFile, writeFile } from "./tasks/fileBrowser.js";
 import { readPermissions, saveTaskPermissions, supportedNetworkModes, type TaskPermissions } from "./tasks/permissions.js";
 import { workspaceSnapshotPath } from "./providers/workspaceTransfer.js";
@@ -22,7 +23,7 @@ import { CodexPtySessionManager, type CodexTerminalSessions } from "./codex/Code
 import { CodexAppServerBridge } from "./codex/CodexAppServerBridge.js";
 import { CodexModelCatalog, type CodexModelCatalogReader } from "./codex/modelCatalog.js";
 import { registerTerminalRoutes } from "./terminal/terminalRouter.js";
-import type { CodexTask, CreateTaskInput, WebuiConfig, WorkStatus } from "./types.js";
+import type { CodexTask, WebuiConfig, WorkStatus } from "./types.js";
 import type { RunnerProvider } from "./providers/Provider.js";
 
 export interface HostCodexRunner {
@@ -138,10 +139,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
     });
 
     app.post("/api/tasks", async (request, reply) => {
-        const input = request.body as CreateTaskInput;
-        const task = createTask(input, config, db);
-        scheduler.emit(task, "task.created", { status: task.status });
-        return reply.code(201).send(task);
+        const input = await readTaskInput(request, config);
+        const source = normalizeTaskSource(input.source);
+        const existing = source ? db.getTaskBySource(source) : undefined;
+        const task = createTask({ ...input, source }, config, db);
+        if (!existing) scheduler.emit(task, "task.created", { status: task.status });
+        return reply.code(existing ? 200 : 201).send(task);
     });
 
     app.get("/api/tasks", async () => db.listTasks());

@@ -9,6 +9,7 @@ export interface CodexSettings {
 }
 
 export interface CreateTaskRequest {
+    source?: { platform: "ctfd"; competition: string; account: string; challengeId: string; contentHash: string };
     name?: string;
     prompt: string;
     backend?: Backend;

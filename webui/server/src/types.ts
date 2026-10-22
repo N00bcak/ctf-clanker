@@ -129,7 +129,16 @@ export interface AttachmentInput {
     contentBase64: string;
 }
 
+export interface TaskSource {
+    platform: "ctfd";
+    competition: string;
+    account: string;
+    challengeId: string;
+    contentHash: string;
+}
+
 export interface CreateTaskInput {
+    source?: TaskSource;
     name?: string;
     prompt: string;
     backend?: Backend;
