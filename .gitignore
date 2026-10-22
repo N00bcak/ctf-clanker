@@ -1,0 +1,30 @@
+.mecha/
+
+# Generated browser state and verification artifacts.
+.DS_Store
+.playwright-cli/
+.playwright-mcp/
+__pycache__/
+*.py[cod]
+.codex-work/
+/output/
+
+# Challenge downloads and runtime data are local, not source.
+/webui/imports/
+/webui/cache/**
+!/webui/cache/.gitkeep
+
+# CTF family roots contain skill directories, not loose solver work files.
+/families/ctf/*
+!/families/ctf/*/
+/families/ctf/artifacts/
+/families/ctf/cts-baseline/
+/families/ctf/expcalibur-artifacts/
+/families/ctf/expcalibur-seven-seed-probes/
+/families/ctf/output/
+/families/ctf/records/
+/families/ctf/scratch/
+/families/ctf/.codex-work/
+/families/ctf/.playwright-cli/
+/families/ctf/.playwright-mcp/
+/families/ctf/__pycache__/
