@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Task } from "./api";
 import { EventLog } from "./EventLog";
 import { FileBrowser } from "./FileBrowser";
 import { PermissionsEditor } from "./PermissionsEditor";
 import { TerminalPane } from "./TerminalPane";
+import { useMediaQuery, useOverlay } from "./useOverlay";
 
 const INSPECTOR_OPEN_KEY = "mecha-webui-inspector-open";
 const INSPECTOR_WIDTH_KEY = "mecha-webui-inspector-width";
@@ -22,13 +23,20 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
     const [prompt, setPrompt] = useState("");
     const [consoleTab, setConsoleTab] = useState<"codex" | "shell">("codex");
     const [toolTab, setToolTab] = useState<"files" | "permissions" | "events" | "context">("files");
-    const [inspectorOpen, setInspectorOpen] = useState(() => window.localStorage.getItem(INSPECTOR_OPEN_KEY) !== "false");
+    const overlayInspector = useMediaQuery("(max-width: 1279px)");
+    const [desktopInspectorOpen, setDesktopInspectorOpen] = useState(() => window.localStorage.getItem(INSPECTOR_OPEN_KEY) !== "false");
+    const [overlayInspectorOpen, setOverlayInspectorOpen] = useState(false);
+    const inspectorOpen = overlayInspector ? overlayInspectorOpen : desktopInspectorOpen;
     const [inspectorWidth, setInspectorWidth] = useState(() => {
         const stored = Number(window.localStorage.getItem(INSPECTOR_WIDTH_KEY));
         return Number.isFinite(stored) && stored > 0 ? clampInspectorWidth(stored) : INSPECTOR_DEFAULT;
     });
     const [destroyOpen, setDestroyOpen] = useState(false);
     const [destroyName, setDestroyName] = useState("");
+    const inspectorRef = useRef<HTMLElement>(null);
+    const destroyRef = useRef<HTMLElement>(null);
+    useOverlay(overlayInspector && inspectorOpen && !destroyOpen, inspectorRef, () => toggleInspector(false));
+    useOverlay(destroyOpen, destroyRef, () => { setDestroyOpen(false); setDestroyName(""); });
     const shellAvailable = task.codexRuntime !== "host";
 
     useEffect(() => {
@@ -40,52 +48,26 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
         setDestroyName("");
     }, [task.id]);
 
-    function runnerReady(candidate: Task): boolean {
-        return candidate.bridgeMode === "host-codex-broker" || (candidate.status === "running" && Boolean(candidate.activeProvisioningIntentId));
-    }
-
-    async function action(fn: () => Promise<unknown>) {
+    async function action(fn: () => Promise<unknown>, label = "Updating task...") {
         try {
             setError(undefined);
             setWarning(undefined);
-            setProgress(undefined);
+            setProgress(label);
             await fn();
             await onChanged();
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
+        } finally {
             setProgress(undefined);
         }
     }
 
     async function startTask() {
-        let phase = "Starting runner";
-        try {
-            setError(undefined);
-            setWarning(undefined);
-            setProgress(`${phase}...`);
-            const started = await api.start(task.id);
-            await onChanged();
-            if (!runnerReady(started)) {
-                setWarning("Runner is not ready yet; Codex has not been called.");
-                setProgress(undefined);
-                return;
-            }
-            if (task.status === "draft") {
-                phase = "Calling Codex";
-                setProgress(`${phase}...`);
-                const initial = await api.initialPrompt(task.id);
-                await api.prompt(task.id, initial.prompt);
-                await onChanged();
-            }
-            setProgress(undefined);
-        } catch (err) {
-            setError(err instanceof Error ? `${phase} failed: ${err.message}` : String(err));
-            setProgress(undefined);
-        }
+        await action(() => api.start(task.id), "Accepting run...");
     }
 
     async function sendPrompt() {
-        if (!prompt.trim()) return;
+        if (!prompt.trim() || !canSend || progress) return;
         try {
             setError(undefined);
             setWarning(undefined);
@@ -101,8 +83,11 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
     }
 
     function toggleInspector(open: boolean) {
-        setInspectorOpen(open);
-        window.localStorage.setItem(INSPECTOR_OPEN_KEY, String(open));
+        if (overlayInspector) setOverlayInspectorOpen(open);
+        else {
+            setDesktopInspectorOpen(open);
+            window.localStorage.setItem(INSPECTOR_OPEN_KEY, String(open));
+        }
     }
 
     function startInspectorResize(event: React.MouseEvent<HTMLDivElement>): void {
@@ -128,14 +113,14 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
 
     const status = task.status;
     const disabled = {
-        start: ["queued", "provisioning", "destroying", "finished", "orphaned"].includes(status) || Boolean(progress),
+        start: ["queued", "provisioning", "running", "destroying", "finished", "orphaned"].includes(status) || Boolean(progress),
         stop: ["draft", "idle", "failed", "destroying", "finished", "orphaned"].includes(status) || Boolean(progress),
         destroy: ["destroying", "orphaned"].includes(status) || Boolean(progress)
     };
     const startClass = status === "running" ? "action-button action-green" : disabled.start ? "action-button action-disabled" : "action-button action-yellow";
     const stopClass = disabled.stop ? "action-button action-disabled" : "action-button action-yellow";
     const workStatusLabel: Record<Task["workStatus"], string> = { "not-started": "READY", running: "RUNNING", "needs-attention": "ATTENTION", done: "DONE", failed: "FAILED" };
-    const canSend = task.bridgeMode !== "native-codex-app-server" || runnerReady(task);
+    const canSend = !["queued", "provisioning", "running", "destroying", "orphaned"].includes(status);
     const nativeSandbox = task.codexSettings?.sandbox ?? "danger-full-access";
     const risks = [
         task.networkMode === "open" ? "Open network permits outbound exfiltration from readable task data." : undefined,
@@ -162,7 +147,7 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
                     </div>
                     <div className="actions work-actions">
                         <button disabled={task.workStatus === "done" || Boolean(progress)} onClick={() => action(() => api.workStatus(task.id, "done"))}>Mark Done</button>
-                        <button disabled={task.workStatus !== "done" || Boolean(progress)} onClick={() => action(() => api.workStatus(task.id, "running"))}>Reopen</button>
+                        <button disabled={task.workStatus !== "done" || Boolean(progress)} onClick={() => action(() => api.workStatus(task.id, "needs-attention"))}>Reopen</button>
                         <button className="button-danger-quiet" disabled={disabled.destroy} onClick={() => setDestroyOpen(true)}>Destroy</button>
                     </div>
                     <button className="inspector-toggle" aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"} aria-expanded={inspectorOpen} onClick={() => toggleInspector(!inspectorOpen)}>{inspectorOpen ? "Hide Inspector" : "Show Inspector"}</button>
@@ -171,7 +156,8 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
             <div className="task-feedback" aria-live="polite">
                 {progress && <div className="progress-message"><span className="spinner" />{progress}</div>}
                 {warning && <div className="warning">{warning}</div>}
-                {error && <div className="error">{error}</div>}
+                {task.executionError && <div className="error">{task.executionError}</div>}
+            {error && <div className="error">{error}</div>}
             </div>
             {risks.length > 0 && (
                 <details className="risk-panel">
@@ -186,7 +172,7 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
                             <button role="tab" aria-selected={consoleTab === "codex"} className={consoleTab === "codex" ? "tab active" : "tab"} onClick={() => setConsoleTab("codex")}>Codex</button>
                             {shellAvailable && <button role="tab" aria-selected={consoleTab === "shell"} className={consoleTab === "shell" ? "tab active" : "tab"} onClick={() => setConsoleTab("shell")}>Shell</button>}
                         </div>
-                        <span className="connection-label"><i className={runnerReady(task) ? "connected" : ""} />{runnerReady(task) ? "CONNECTED" : "WAITING"}</span>
+                        <span className="connection-label"><i className={status === "running" ? "connected" : ""} />{status === "running" ? "CONNECTED" : "WAITING"}</span>
                     </div>
                     <div className="console-content" role="tabpanel" aria-label={`${consoleTab} console`}><TerminalPane task={task} mode={consoleTab} /></div>
                     <section className="prompt-composer">
@@ -207,7 +193,7 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
                 </section>
                 {inspectorOpen && <>
                     <div aria-label="Resize inspector" aria-orientation="vertical" className="inspector-resizer" role="separator" onMouseDown={startInspectorResize} />
-                    <aside className="inspector-panel open" aria-label="Task inspector">
+                    <aside ref={inspectorRef} className="inspector-panel open" aria-label="Task inspector" role={overlayInspector ? "dialog" : undefined} aria-modal={overlayInspector ? true : undefined} tabIndex={-1}>
                         <div className="inspector-header"><div><span className="eyebrow">Selected task</span><strong>Inspector</strong></div><button className="icon-button inspector-close" aria-label="Close inspector" onClick={() => toggleInspector(false)}>×</button></div>
                         <div className="tool-tabs" role="tablist" aria-label="Task tools">
                             {(["files", "permissions", "events", "context"] as const).map((tab) => (
@@ -216,7 +202,7 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
                         </div>
                         <div className="tool-panel" role="tabpanel" aria-label={`${toolTab} inspector`}>
                             {toolTab === "files" && <FileBrowser task={task} />}
-                            {toolTab === "permissions" && <PermissionsEditor task={task} />}
+                            {toolTab === "permissions" && <PermissionsEditor task={task} onChanged={onChanged} />}
                             {toolTab === "events" && <EventLog task={task} />}
                             {toolTab === "context" && (
                                 <section className="pane context-pane">
@@ -239,7 +225,7 @@ export function TaskView({ task, onChanged }: { task: Task; onChanged: () => voi
             </div>
             {destroyOpen && (
                 <div className="dialog-backdrop danger-backdrop" role="presentation">
-                    <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="destroy-title">
+                    <section ref={destroyRef} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="destroy-title" tabIndex={-1}>
                         <span className="danger-symbol" aria-hidden="true">!</span>
                         <h2 id="destroy-title">Destroy {task.name}?</h2>
                         <p>This removes the runner and task storage. Type <strong>{task.name}</strong> to confirm.</p>

@@ -13,7 +13,7 @@ import { FileBrowser } from "../client/src/FileBrowser";
 import { PermissionsEditor } from "../client/src/PermissionsEditor";
 import { sanitizeCodexTranscript, TerminalPane } from "../client/src/TerminalPane";
 import { App } from "../client/src/main";
-import type { Task } from "../client/src/api";
+import type { PermissionsState, Task } from "../client/src/api";
 
 const { FakeFitAddon, FakeTerminal } = vi.hoisted(() => {
     class FakeFitAddon {
@@ -126,6 +126,33 @@ function mockFetch(handler: (url: string, init?: RequestInit) => unknown): void 
     }));
 }
 
+function permissionState(mode = "open", editable = true, reason?: string): PermissionsState {
+    return {
+        permissions: { version: 1, network: { mode, enforcement: mode === "none" ? "docker-none" : "open-warning", allow: [] }, mounts: [] },
+        supportedNetworkModes: ["open", "none"], editable, reason
+    };
+}
+
+function mockViewport(initialWidth: number) {
+    let width = initialWidth;
+    const queries: Array<{ query: string; media: MediaQueryList; listeners: Set<() => void> }> = [];
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => {
+        const listeners = new Set<() => void>();
+        const media = {
+            get matches() { return width <= Number(query.match(/max-width:\s*(\d+)/)?.[1] ?? 0); },
+            media: query,
+            addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+            removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener)
+        } as unknown as MediaQueryList;
+        queries.push({ query, media, listeners });
+        return media;
+    }));
+    return (nextWidth: number) => {
+        width = nextWidth;
+        for (const item of queries) for (const listener of item.listeners) listener();
+    };
+}
+
 describe("client smoke tests", () => {
     beforeEach(() => {
         FakeWebSocket.instances = [];
@@ -149,6 +176,7 @@ describe("client smoke tests", () => {
 
     afterEach(() => {
         cleanup();
+        vi.useRealTimers();
         vi.unstubAllGlobals();
     });
 
@@ -172,7 +200,7 @@ describe("client smoke tests", () => {
         expect(urls).toEqual(["/api/tasks"]);
     });
 
-    it("runs clanker by creating, starting, and prompting in order", async () => {
+    it("runs clanker by creating and enqueueing without a client prompt", async () => {
         const created = task({ id: "created", name: "Created", status: "draft" });
         const requests: Array<{ url: string; body?: unknown }> = [];
         mockFetch((url, init) => {
@@ -190,13 +218,12 @@ describe("client smoke tests", () => {
 
         await waitFor(() => expect(requests.map((request) => request.url)).toEqual([
             "/api/tasks",
-            "/api/tasks/created/start",
-            "/api/tasks/created/prompt"
+            "/api/tasks/created/start"
         ]));
-        expect(requests[2].body).toEqual({ prompt: "Do work" });
+        expect(requests[0].body).toEqual(expect.objectContaining({ prompt: "Do work" }));
     });
 
-    it("shows a warning and does not prompt when Create & Run returns queued", async () => {
+    it("closes the dialog after queued acceptance", async () => {
         const requests: string[] = [];
         mockFetch((url) => {
             requests.push(url);
@@ -205,11 +232,12 @@ describe("client smoke tests", () => {
             return task();
         });
 
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
+        const onClose = vi.fn();
+        render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
         fireEvent.click(screen.getByText("Create & Run"));
 
-        expect(await screen.findByText("Runner is not ready yet; Codex has not been called.")).toBeTruthy();
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
         expect(requests).not.toContain("/api/tasks/queued/prompt");
     });
 
@@ -228,9 +256,44 @@ describe("client smoke tests", () => {
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
         fireEvent.click(screen.getByText("Create & Run"));
 
-        expect(await screen.findByText(/Starting runner failed: docker failed/)).toBeTruthy();
+        expect(await screen.findByText(/Accepting run failed: docker failed/)).toBeTruthy();
         expect(screen.getByDisplayValue("Created")).toBeTruthy();
         expect(screen.getByDisplayValue("Do work")).toBeTruthy();
+    });
+
+    it("closes on acceptance without waiting for a refresh or solver request", async () => {
+        let accept!: (value: unknown) => void;
+        const accepted = new Promise(resolve => { accept = resolve; });
+        const onClose = vi.fn();
+        const onCreated = vi.fn(() => new Promise<void>(() => {}));
+        vi.stubGlobal("fetch", vi.fn(async (url: string) => ({
+            ok: true,
+            json: async () => url.endsWith("/start") ? accepted : task({ id: "accepted", status: "draft" })
+        })));
+        render(<TaskCreateDialog open onClose={onClose} onCreated={onCreated} onSelect={vi.fn()} />);
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "solve later" } });
+        fireEvent.click(screen.getByText("Create & Run"));
+        await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/tasks/accepted/start", expect.anything()));
+        expect(onClose).not.toHaveBeenCalled();
+        await act(async () => accept(task({ id: "accepted", status: "queued" })));
+        expect(onClose).toHaveBeenCalledOnce();
+        expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/prompt"))).toBe(false);
+    });
+
+    it("retries acceptance against the already-created task", async () => {
+        let attempts = 0;
+        const onClose = vi.fn();
+        vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+            if (url.endsWith("/start") && ++attempts === 1) return { ok: false, json: async () => ({ error: "temporary failure" }) };
+            return { ok: true, json: async () => task({ id: "retry", status: "queued" }) };
+        }));
+        render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "one task" } });
+        fireEvent.click(screen.getByText("Create & Run"));
+        await screen.findByText(/temporary failure/);
+        fireEvent.click(screen.getByText("Create & Run"));
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+        expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/tasks")).toHaveLength(1);
     });
 
     it("sets up a task with settings and uploaded files", async () => {
@@ -288,6 +351,15 @@ describe("client smoke tests", () => {
             codexSettings: { sandbox: "danger-full-access", approvalPolicy: "never", webSearch: false },
             attachments: [{ path: "attachments/pwn-001/chal.py", contentBase64: "cHJpbnQoMSk=" }]
         });
+    });
+
+    it("shows queued tasks in server admission order ahead of drafts", () => {
+        const { container } = render(<TaskList tasks={[
+            task({ id: "draft", name: "Draft", status: "draft", workStatus: "not-started" }),
+            task({ id: "later", name: "Later", status: "queued", workStatus: "not-started", queueOrder: 9 }),
+            task({ id: "earlier", name: "Earlier", status: "queued", workStatus: "not-started", queueOrder: 4 })
+        ]} onSelect={vi.fn()} />);
+        expect(Array.from(container.querySelectorAll(".task-row strong")).map(node => node.textContent)).toEqual(["Earlier", "Later", "Draft"]);
     });
 
     it("groups the task queue by attention priority and filters by search and status", () => {
@@ -359,7 +431,7 @@ describe("client smoke tests", () => {
         expect(screen.getByText(/Host broker uses the host Codex CLI/)).toBeTruthy();
     });
 
-    it("starts a draft task by starting the runner, reading the stored prompt, and calling Codex", async () => {
+    it("enqueues a draft without submitting its prompt from the client", async () => {
         const calls: string[] = [];
         mockFetch((url) => {
             calls.push(url);
@@ -372,9 +444,7 @@ describe("client smoke tests", () => {
         fireEvent.click(screen.getByText("Start"));
 
         await waitFor(() => expect(calls.filter((url) => url.includes("/start") || url.includes("/initial-prompt") || url.includes("/prompt"))).toEqual([
-            "/api/tasks/task_1/start",
-            "/api/tasks/task_1/initial-prompt",
-            "/api/tasks/task_1/prompt"
+            "/api/tasks/task_1/start"
         ]));
     });
 
@@ -386,7 +456,7 @@ describe("client smoke tests", () => {
             if (url.includes("/files")) return [];
             return task({ activeProvisioningIntentId: "intent-1" });
         });
-        render(<TaskView task={task({ activeProvisioningIntentId: "intent-1" })} onChanged={vi.fn()} />);
+        render(<TaskView task={task({ status: "idle", activeProvisioningIntentId: "intent-1" })} onChanged={vi.fn()} />);
         const composer = screen.getByLabelText("Prompt Codex");
         fireEvent.change(composer, { target: { value: "continue analysis" } });
         fireEvent.keyDown(composer, { key: "Enter" });
@@ -399,7 +469,7 @@ describe("client smoke tests", () => {
         }));
     });
 
-    it("shows a warning and does not prompt when draft Start has no runner yet", async () => {
+    it("accepts queued Start without submitting a client prompt", async () => {
         const calls: string[] = [];
         mockFetch((url) => {
             calls.push(url);
@@ -411,7 +481,7 @@ describe("client smoke tests", () => {
         render(<TaskView task={task({ status: "draft" })} onChanged={vi.fn()} />);
         fireEvent.click(screen.getByText("Start"));
 
-        expect(await screen.findByText("Runner is not ready yet; Codex has not been called.")).toBeTruthy();
+        await waitFor(() => expect(calls).toContain("/api/tasks/task_1/start"));
         expect(calls).not.toContain("/api/tasks/task_1/prompt");
     });
 
@@ -527,7 +597,7 @@ describe("client smoke tests", () => {
 
         await waitFor(() => expect(calls).toContainEqual({
             url: "/api/tasks/task_1/status",
-            body: { workStatus: "running" }
+            body: { workStatus: "needs-attention" }
         }));
     });
 
@@ -603,13 +673,12 @@ describe("client smoke tests", () => {
 
         await waitFor(() => expect(requests.filter((url) => url.includes("host") || url === "/api/tasks")).toEqual([
             "/api/tasks",
-            "/api/tasks/host/start",
-            "/api/tasks/host/prompt"
+            "/api/tasks/host/start"
         ]));
         expect(screen.queryByText("Runner is not ready yet; Codex has not been called.")).toBeNull();
     });
 
-    it("shows a warning and does not prompt when Create & Run DigitalOcean dry-run is not ready", async () => {
+    it("closes after accepting a cloud run without submitting a client prompt", async () => {
         const requests: string[] = [];
         mockFetch((url) => {
             requests.push(url);
@@ -618,12 +687,13 @@ describe("client smoke tests", () => {
             return task();
         });
 
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
+        const onClose = vi.fn();
+        render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
         fireEvent.change(screen.getByDisplayValue("Local appserver"), { target: { value: "digitalocean" } });
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
         fireEvent.click(screen.getByText("Create & Run"));
 
-        expect(await screen.findByText("Runner is not ready yet; Codex has not been called.")).toBeTruthy();
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
         expect(requests).not.toContain("/api/tasks/dry/prompt");
     });
 
@@ -735,13 +805,14 @@ describe("client smoke tests", () => {
     });
 
     it("renders PermissionsEditor and saves mocked permissions", async () => {
-        mockFetch(() => ({ ok: true }));
+        mockFetch((_url, init) => init?.method === "PATCH" ? JSON.parse(String(init.body)) : permissionState());
         render(<PermissionsEditor task={task()} />);
 
+        await waitFor(() => expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", false));
         fireEvent.change(screen.getByLabelText("Network mode"), { target: { value: "none" } });
         fireEvent.click(screen.getByText("Save Permissions"));
 
-        expect(await screen.findByText("Saved")).toBeTruthy();
+        expect(await screen.findByText("Saved; applies to the next run.")).toBeTruthy();
     });
 
     it("resets FileBrowser state when switching tasks", async () => {
@@ -770,16 +841,234 @@ describe("client smoke tests", () => {
     });
 
     it("resets PermissionsEditor state when switching tasks", async () => {
-        mockFetch(() => ({ ok: true }));
+        mockFetch((_url, init) => init?.method === "PATCH" ? JSON.parse(String(init.body)) : permissionState());
         const { rerender } = render(<PermissionsEditor task={task({ networkMode: "open" })} />);
 
+        await waitFor(() => expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", false));
         fireEvent.change(screen.getByLabelText("Network mode"), { target: { value: "none" } });
         fireEvent.click(screen.getByText("Save Permissions"));
-        expect(await screen.findByText("Saved")).toBeTruthy();
+        expect(await screen.findByText("Saved; applies to the next run.")).toBeTruthy();
 
         rerender(<PermissionsEditor task={task({ id: "task_2", networkMode: "open" })} />);
 
-        expect(screen.getByLabelText("Network mode")).toHaveProperty("value", "open");
-        expect(screen.queryByText("Saved")).toBeNull();
+        await waitFor(() => expect(screen.getByLabelText("Network mode")).toHaveProperty("value", "open"));
+        expect(screen.queryByText("Saved; applies to the next run.")).toBeNull();
+    });
+
+    it("finishes draft creation even when its refresh callback rejects", async () => {
+        const created = task({ id: "saved", status: "draft" });
+        const onClose = vi.fn();
+        const onCreated = vi.fn(async () => { throw new Error("refresh unavailable"); });
+        mockFetch(() => created);
+        render(<TaskCreateDialog open onClose={onClose} onCreated={onCreated} onSelect={vi.fn()} />);
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "solve" } });
+        fireEvent.click(screen.getByText("Create Draft"));
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+        expect(onCreated).toHaveBeenCalledWith([created]);
+        expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/tasks")).toHaveLength(1);
+        expect(screen.queryByText(/Creating task failed/)).toBeNull();
+    });
+
+    it("starts a fresh form after closing a saved task whose Start failed", async () => {
+        const onCreated = vi.fn();
+        vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/start")
+            ? { ok: false, json: async () => ({ error: "enqueue unavailable" }) }
+            : { ok: true, json: async () => url.endsWith("/models") ? { models: [] } : task({ id: "saved", status: "draft" }) }));
+        const props = { open: true, onClose: vi.fn(), onCreated, onSelect: vi.fn() };
+        const { rerender } = render(<TaskCreateDialog {...props} />);
+        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Original" } });
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "original prompt" } });
+        fireEvent.click(screen.getByText("Create & Run"));
+        await screen.findByText(/enqueue unavailable/);
+        expect(screen.getByPlaceholderText("Initial prompt")).toHaveProperty("disabled", true);
+        expect(onCreated).toHaveBeenCalledWith([expect.objectContaining({ id: "saved" })]);
+        rerender(<TaskCreateDialog {...props} open={false} />);
+        rerender(<TaskCreateDialog {...props} />);
+        expect(screen.getByPlaceholderText("Initial prompt")).toHaveProperty("disabled", false);
+        expect(screen.getByPlaceholderText("Initial prompt")).toHaveProperty("value", "");
+        expect(screen.getByPlaceholderText("Task name")).toHaveProperty("value", "");
+        expect(screen.getByText("Create Draft")).toHaveProperty("disabled", false);
+    });
+
+    it("keeps the returned created task when refresh fails and ignores an older list response", async () => {
+        let resolveOld: (value: Task[]) => void = () => undefined;
+        let lists = 0;
+        const created = task({ id: "new_saved", name: "Saved operation", status: "draft" });
+        mockFetch((url, init) => {
+            if (url === "/api/tasks" && !init?.method) {
+                if (++lists === 1) return new Promise<Task[]>((resolve) => { resolveOld = resolve; });
+                throw new Error("list unavailable");
+            }
+            if (url === "/api/tasks") return created;
+            if (url.includes("/codex-session")) return { state: "not-started" };
+            return [];
+        });
+        render(<App />);
+        fireEvent.click(screen.getAllByRole("button", { name: /New Task/ })[0]);
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "solve" } });
+        fireEvent.click(screen.getByText("Create Draft"));
+        expect(await screen.findByRole("heading", { name: "Saved operation" })).toBeTruthy();
+        expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Refreshing tasks failed: list unavailable");
+        expect(screen.queryByRole("dialog", { name: "New operation" })).toBeNull();
+        await act(async () => resolveOld([]));
+        expect(screen.getByRole("heading", { name: "Saved operation" })).toBeTruthy();
+    });
+
+    it("ignores errors from an older task-list request after a newer refresh succeeds", async () => {
+        vi.useFakeTimers();
+        let rejectOld: (error: Error) => void = () => undefined;
+        let lists = 0;
+        mockFetch((url) => {
+            if (url === "/api/tasks") return ++lists === 1
+                ? new Promise<Task[]>((_resolve, reject) => { rejectOld = reject; })
+                : [task({ name: "Current operation", status: "idle" })];
+            return [];
+        });
+        render(<App />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+        expect(screen.getByRole("heading", { name: "Current operation" })).toBeTruthy();
+        await act(async () => rejectOld(new Error("old request failed")));
+        expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("polls files without overlapping a slow request and stops after unmount", async () => {
+        vi.useFakeTimers();
+        let resolveFirst: (value: unknown) => void = () => undefined;
+        let calls = 0;
+        mockFetch(() => ++calls === 1
+            ? new Promise((resolve) => { resolveFirst = resolve; })
+            : [{ name: "flag.txt", path: "flag.txt", type: "file", size: 4 }]);
+        const { unmount } = render(<FileBrowser task={task()} />);
+        expect(screen.queryByText("No files in this directory.")).toBeNull();
+        await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+        expect(calls).toBe(1);
+        await act(async () => resolveFirst([]));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+        expect(calls).toBe(2);
+        expect(screen.getByText("flag.txt")).toBeTruthy();
+        unmount();
+        await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+        expect(calls).toBe(2);
+    });
+
+    it("refreshes files on lifecycle changes and ignores superseded responses", async () => {
+        let resolveOld: (value: unknown) => void = () => undefined;
+        let calls = 0;
+        mockFetch(() => ++calls === 1 ? new Promise((resolve) => { resolveOld = resolve; })
+            : [{ name: calls === 2 ? "generated.txt" : "manual.txt", path: "result.txt", type: "file", size: 4 }]);
+        const { rerender } = render(<FileBrowser task={task({ status: "running" })} />);
+        rerender(<FileBrowser task={task({ status: "idle", workStatus: "done" })} />);
+        expect(await screen.findByText("generated.txt")).toBeTruthy();
+        await act(async () => resolveOld([{ name: "old.txt", path: "old.txt", type: "file", size: 0 }]));
+        expect(screen.queryByText("old.txt")).toBeNull();
+        fireEvent.click(screen.getByLabelText("Refresh files"));
+        expect(await screen.findByText("manual.txt")).toBeTruthy();
+    });
+
+    it("labels live remote snapshots and refreshes after a downloaded generation changes", async () => {
+        let calls = 0;
+        mockFetch(() => { calls += 1; return []; });
+        const sync = { owner: "remote" as const, state: "idle" as const, generation: "one", lastSyncedAt: "2026-10-16T01:00:00Z" };
+        const { rerender } = render(<FileBrowser task={task({ workspaceSync: sync })} />);
+        expect(await screen.findByText(/Live remote task; displayed files are a provisional snapshot/)).toBeTruthy();
+        expect(screen.getByRole("status").textContent).toContain("Last synced:");
+        await waitFor(() => expect(calls).toBe(1));
+        rerender(<FileBrowser task={task({ workspaceSync: { ...sync, generation: "two" } })} />);
+        await waitFor(() => expect(calls).toBe(2));
+        rerender(<FileBrowser task={task({ workspaceSync: { ...sync, state: "error", error: "download failed" } })} />);
+        expect(screen.getByRole("status").textContent).toContain("Displayed files may be stale.");
+    });
+
+    it("loads saved permissions independently of task metadata and preserves mounts when saving", async () => {
+        const saved = permissionState("none");
+        saved.permissions.mounts = [{ label: "data", source: "/tmp/data", target: "/mnt/extra/data", mode: "ro" }];
+        const changed = vi.fn();
+        mockFetch((_url, init) => init?.method === "PATCH" ? JSON.parse(String(init.body)) : saved);
+        render(<PermissionsEditor task={task({ networkMode: "open" })} onChanged={changed} />);
+        await waitFor(() => expect(screen.getByLabelText("Network mode")).toHaveProperty("value", "none"));
+        expect(screen.getByRole("option", { name: "codex-only" })).toHaveProperty("disabled", true);
+        expect(screen.getByRole("option", { name: "proxy-allowlist" })).toHaveProperty("disabled", true);
+        expect(screen.getByText("Supported network modes for this runtime: open, none.")).toBeTruthy();
+        fireEvent.change(screen.getByLabelText("Network mode"), { target: { value: "open" } });
+        fireEvent.click(screen.getByText("Save Permissions"));
+        await screen.findByText("Saved; applies to the next run.");
+        const patch = vi.mocked(fetch).mock.calls.find(([_url, init]) => init?.method === "PATCH");
+        expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({ mounts: saved.permissions.mounts, network: { mode: "open", enforcement: "open-warning" } });
+        expect(changed).toHaveBeenCalledOnce();
+    });
+
+    it("disables permission changes using the backend reason", async () => {
+        mockFetch(() => permissionState("open", false, "Stop the active run before editing permissions."));
+        render(<PermissionsEditor task={task()} />);
+        expect(await screen.findByText("Stop the active run before editing permissions.")).toBeTruthy();
+        expect(screen.getByLabelText("Network mode")).toHaveProperty("disabled", true);
+        expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", true);
+    });
+
+    it("keeps an unsaved permission selection when task status refreshes", async () => {
+        mockFetch(() => permissionState("open"));
+        const { rerender } = render(<PermissionsEditor task={task({ status: "draft" })} />);
+        await waitFor(() => expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", false));
+        fireEvent.change(screen.getByLabelText("Network mode"), { target: { value: "none" } });
+        rerender(<PermissionsEditor task={task({ status: "idle" })} />);
+        await waitFor(() => expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", false));
+        expect(screen.getByLabelText("Network mode")).toHaveProperty("value", "none");
+    });
+
+    it("reports an invalid permissions response without rendering editable controls", async () => {
+        mockFetch(() => ({ ok: true }));
+        render(<PermissionsEditor task={task()} />);
+        expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Server returned an invalid permissions response");
+        expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", true);
+        expect(screen.getByText("Retry permissions")).toBeTruthy();
+    });
+
+    it("uses a transient mobile queue and restores focus on Escape without changing desktop preferences", async () => {
+        const resize = mockViewport(390);
+        window.localStorage.setItem("mecha-webui-sidebar-open", "true");
+        window.localStorage.setItem("mecha-webui-sidebar-width", "560");
+        mockFetch((url) => url === "/api/tasks" ? [task()] : []);
+        const { container } = render(<App />);
+        await screen.findByRole("heading", { name: "Native task" });
+        const toggle = screen.getByLabelText("Expand task queue");
+        toggle.focus();
+        fireEvent.click(toggle);
+        expect(screen.getByRole("dialog", { name: "Task queue drawer" })).toBeTruthy();
+        expect(document.activeElement).toBe(screen.getByLabelText("Search tasks"));
+        fireEvent.keyDown(window, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: "Task queue drawer" })).toBeNull();
+        expect(document.activeElement).toBe(toggle);
+        expect(window.localStorage.getItem("mecha-webui-sidebar-open")).toBe("true");
+        act(() => resize(1400));
+        expect(container.querySelector(".app")?.classList.contains("sidebar-collapsed")).toBe(false);
+        expect(container.querySelector(".app")?.getAttribute("style")).toContain("560px");
+    });
+
+    it("closes an inspector overlay with Escape and restores focus to its opener", async () => {
+        mockViewport(390);
+        mockFetch(() => []);
+        render(<TaskView task={task()} onChanged={vi.fn()} />);
+        const toggle = screen.getByLabelText("Show inspector");
+        toggle.focus();
+        fireEvent.click(toggle);
+        expect(screen.getByRole("dialog", { name: "Task inspector" })).toBeTruthy();
+        fireEvent.keyDown(window, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: "Task inspector" })).toBeNull();
+        expect(document.activeElement).toBe(toggle);
+    });
+
+    it("restores New Task focus and traps keyboard navigation inside its modal", () => {
+        mockFetch(() => []);
+        const { rerender } = render(<><button>Open task</button><TaskCreateDialog open={false} onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} /></>);
+        const opener = screen.getByText("Open task");
+        opener.focus();
+        rerender(<><button>Open task</button><TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} /></>);
+        const last = screen.getByText("Create & Run");
+        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "solve" } });
+        last.focus();
+        fireEvent.keyDown(window, { key: "Tab" });
+        expect(document.activeElement).toBe(screen.getByLabelText("Close new task dialog"));
+        rerender(<><button>Open task</button><TaskCreateDialog open={false} onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} /></>);
+        expect(document.activeElement).toBe(opener);
     });
 });

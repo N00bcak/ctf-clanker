@@ -53,7 +53,8 @@ export function TaskList(props: {
             </div>
             <div className="queue-groups">
                 {groups.map((group) => {
-                    const tasks = visibleTasks.filter((task) => group.statuses.includes(task.workStatus));
+                    const tasks = visibleTasks.filter((task) => group.statuses.includes(task.workStatus))
+                        .sort((a, b) => (a.queueOrder ?? Infinity) - (b.queueOrder ?? Infinity));
                     if (tasks.length === 0) return null;
                     return (
                         <section className="queue-group" key={group.key} aria-labelledby={`queue-${group.key}`}>

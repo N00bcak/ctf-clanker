@@ -33,6 +33,8 @@ function taskFromRow(row: Row): CodexTask {
     return {
         id: String(row.id),
         name: String(row.name),
+        queueOrder: row.queue_order == null ? undefined : Number(row.queue_order),
+        executionError: row.execution_error ? String(row.execution_error) : undefined,
         backend: row.backend as Backend,
         status: row.status as TaskStatus,
         workStatus: row.work_status as WorkStatus,
@@ -57,7 +59,8 @@ function taskFromRow(row: Row): CodexTask {
         bridgeMode: row.bridge_mode as CodexTask["bridgeMode"],
         networkMode: row.network_mode as CodexTask["networkMode"],
         networkEnforcement: row.network_enforcement as CodexTask["networkEnforcement"],
-        codexSettings: providerSpec.codexSettings as CodexTask["codexSettings"]
+        codexSettings: providerSpec.codexSettings as CodexTask["codexSettings"],
+        workspaceSync: parseJsonObject(row.provider_state)?.workspaceSync as CodexTask["workspaceSync"]
     };
 }
 
@@ -120,6 +123,17 @@ export class WebuiDatabase {
                 network_enforcement TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                prompt TEXT NOT NULL,
+                error TEXT,
+                state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'terminal')),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS execution_one_open_per_task
+                ON executions(task_id) WHERE state IN ('pending', 'active');
+
             CREATE TABLE IF NOT EXISTS provisioning_intents (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -139,7 +153,7 @@ export class WebuiDatabase {
         this.db.exec(`
             UPDATE tasks
             SET work_status = 'running'
-            WHERE status IN ('queued', 'provisioning', 'running') AND work_status = 'not-started';
+            WHERE status IN ('provisioning', 'running') AND work_status = 'not-started';
 
             UPDATE tasks
             SET work_status = 'failed'
@@ -200,11 +214,11 @@ export class WebuiDatabase {
     }
 
     listTasks(): CodexTask[] {
-        return this.db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all().map((row) => taskFromRow(row as Row));
+        return this.db.prepare("SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error, (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order FROM tasks ORDER BY created_at DESC").all().map((row) => taskFromRow(row as Row));
     }
 
     getTask(id: string): CodexTask | undefined {
-        const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
+        const row = this.db.prepare("SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error, (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order FROM tasks WHERE id = ?").get(id) as Row | undefined;
         return row ? taskFromRow(row) : undefined;
     }
 
@@ -225,6 +239,14 @@ export class WebuiDatabase {
 
     updateWorkStatus(id: string, status: WorkStatus): void {
         this.db.prepare("UPDATE tasks SET work_status = ? WHERE id = ?").run(status, id);
+    }
+
+    hasOpenExecution(taskId: string): boolean {
+        return Boolean(this.db.prepare("SELECT 1 FROM executions WHERE task_id=? AND state!='terminal'").get(taskId));
+    }
+
+    updateTaskNetwork(taskId: string, mode: CodexTask["networkMode"], enforcement: CodexTask["networkEnforcement"]): void {
+        this.db.prepare("UPDATE tasks SET network_mode=?, network_enforcement=? WHERE id=?").run(mode, enforcement, taskId);
     }
 
     updateProviderState(taskId: string, state: Record<string, unknown> | undefined): void {
@@ -248,8 +270,8 @@ export class WebuiDatabase {
 
     countActiveLocalTasks(excludeTaskId?: string): number {
         const row = excludeTaskId
-            ? this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND status IN ('provisioning', 'running') AND id != ?").get(excludeTaskId) as Row
-            : this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND status IN ('provisioning', 'running')").get() as Row;
+            ? this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND codex_runtime != 'host' AND status IN ('provisioning', 'running') AND id != ?").get(excludeTaskId) as Row
+            : this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND codex_runtime != 'host' AND status IN ('provisioning', 'running')").get() as Row;
         return Number(row.count);
     }
 

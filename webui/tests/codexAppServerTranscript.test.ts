@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
@@ -62,6 +64,7 @@ class FakeCodexAppServer extends EventEmitter implements AppServerProcess {
             return;
         }
         if (message.method === "thread/resume") {
+            this.write({ jsonrpc: "2.0", method: "thread/status/changed", params: { status: { type: "idle" } } });
             this.write({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params && typeof message.params === "object" ? (message.params as Record<string, unknown>).threadId : this.threadId } } });
             return;
         }
@@ -94,10 +97,13 @@ class FakeCodexAppServer extends EventEmitter implements AppServerProcess {
                 method: "item/completed",
                 params: { item: { id: "agent-1", type: "agentMessage", text: "done offline" } }
             });
+            this.write({ jsonrpc: "2.0", method: "item/completed", params: { item: {
+                type: "commandExecution", aggregatedOutput: '{"outcome":"solved","summary":"tool output","flag":"flag{fake}"}', exitCode: 0
+            } } });
             this.write({
                 jsonrpc: "2.0",
-                method: "thread/status/changed",
-                params: { status: { type: "idle" } }
+                method: "turn/completed",
+                params: { turn: { id: "turn-test", status: "completed" } }
             });
         }
     }
@@ -113,7 +119,7 @@ describe("Codex app-server transcript bridge", () => {
         const output: string[] = [];
         const bridge = new CodexAppServerBridge(config, new SecretRedactor({}, []), db, () => fake);
 
-        await bridge.run(task, {
+        const result = await bridge.run(task, {
             provider: "local",
             taskId: task.id,
             intentId: "intent",
@@ -121,6 +127,7 @@ describe("Codex app-server transcript bridge", () => {
             createdAt: new Date().toISOString()
         }, "hello", (text) => output.push(text));
 
+        expect(result).toBe("done offline");
         expect(fake.requests.some((request) => request.method === "initialize")).toBe(true);
         expect(fake.requests.some((request) => request.method === "thread/start")).toBe(true);
         expect(fake.requests.some((request) => request.method === "turn/start")).toBe(true);
@@ -139,7 +146,7 @@ describe("Codex app-server transcript bridge", () => {
         const fake = new FakeCodexAppServer("unused");
         const bridge = new CodexAppServerBridge(config, new SecretRedactor({}, []), db, () => fake);
 
-        await bridge.run(refreshed, {
+        const finalText = await bridge.run(refreshed, {
             provider: "local",
             taskId: task.id,
             intentId: "intent",
@@ -147,6 +154,7 @@ describe("Codex app-server transcript bridge", () => {
             createdAt: new Date().toISOString()
         }, "resume", () => undefined);
 
+        expect(finalText).toBe("done offline");
         const resume = fake.requests.find((request) => request.method === "thread/resume");
         expect(resume).toBeTruthy();
         expect((resume?.params as Record<string, unknown>).threadId).toBe("thread-existing");
@@ -183,7 +191,10 @@ describe("Codex app-server transcript bridge", () => {
         const output: string[] = [];
         const bridge = new CodexAppServerBridge(config, new SecretRedactor({}, []), db, () => fake);
 
-        await bridge.run(task, {
+        fs.mkdirSync(path.join(task.codexHomePath, "sessions"), { recursive: true });
+        const sessionFile = path.join(task.codexHomePath, "sessions", "thread.jsonl");
+        fs.writeFileSync(sessionFile, "resume me");
+        const finalText = await bridge.run(task, {
             provider: "local",
             taskId: task.id,
             intentId: "intent",
@@ -191,6 +202,8 @@ describe("Codex app-server transcript bridge", () => {
             createdAt: new Date().toISOString()
         }, "stream", (text) => output.push(text));
 
+        expect(finalText).toBe("done offline");
+        expect(fs.readFileSync(sessionFile, "utf8")).toBe("resume me");
         expect(output.filter((text) => text === "done offline")).toHaveLength(1);
     });
 

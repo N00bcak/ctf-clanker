@@ -21,6 +21,8 @@ export interface Task {
     name: string;
     backend: Backend;
     status: string;
+    executionError?: string;
+    queueOrder?: number;
     workStatus: "not-started" | "running" | "needs-attention" | "done" | "failed";
     createdAt: string;
     storagePath: string;
@@ -31,6 +33,26 @@ export interface Task {
     networkMode: string;
     networkEnforcement: string;
     codexSettings?: CodexSettings;
+    workspaceSync?: {
+        owner: "host" | "remote";
+        state: "idle" | "uploading" | "syncing" | "error";
+        generation?: string;
+        lastSyncedAt?: string;
+        error?: string;
+    };
+}
+
+export interface TaskPermissions {
+    version: 1;
+    network: { mode: string; enforcement: string; allow: string[] };
+    mounts: Array<{ label: string; source: string; target: string; mode: "ro" | "rw" | "rx" | "rwx" }>;
+}
+
+export interface PermissionsState {
+    permissions: TaskPermissions;
+    supportedNetworkModes: string[];
+    editable: boolean;
+    reason?: string;
 }
 
 export interface DestroyTaskResult {
@@ -88,7 +110,8 @@ export const api = {
     initialPrompt: (id: string) => json<{ prompt: string }>(`/api/tasks/${id}/initial-prompt`),
     prompt: (id: string, prompt: string) =>
         json<Task>(`/api/tasks/${id}/prompt`, { method: "POST", body: JSON.stringify({ prompt }) }),
-    files: (id: string, path = "") => json<Array<{ name: string; path: string; type: string; size: number }>>(`/api/tasks/${id}/files?path=${encodeURIComponent(path)}`),
-    permissions: (id: string, permissions: unknown) =>
-        json(`/api/tasks/${id}/permissions`, { method: "PATCH", body: JSON.stringify(permissions) })
+    files: (id: string, path = "", signal?: AbortSignal) => json<Array<{ name: string; path: string; type: string; size: number }>>(`/api/tasks/${id}/files?path=${encodeURIComponent(path)}`, { signal }),
+    permissionState: (id: string) => json<PermissionsState>(`/api/tasks/${id}/permissions`),
+    permissions: (id: string, permissions: TaskPermissions) =>
+        json<TaskPermissions>(`/api/tasks/${id}/permissions`, { method: "PATCH", body: JSON.stringify(permissions) })
 };

@@ -9,11 +9,12 @@ import {
     validateManifest,
     type ChallengeManifest
 } from "./challengeIntake";
+import { useOverlay } from "./useOverlay";
 
 export function TaskCreateDialog(props: {
     open: boolean;
     onClose: () => void;
-    onCreated: () => void | Promise<void>;
+    onCreated: (tasks: Task[]) => void | Promise<void>;
     onSelect: (id: string) => void;
 }) {
     const [tab, setTab] = useState<"single" | "batch">("single");
@@ -32,22 +33,27 @@ export function TaskCreateDialog(props: {
     const [modelCatalogSource, setModelCatalogSource] = useState<string>();
     const [modelsLoading, setModelsLoading] = useState(false);
     const [modelsError, setModelsError] = useState<string>();
+    const createdTaskId = useRef<string | undefined>(undefined);
     const nameRef = useRef<HTMLInputElement>(null);
+    const dialogRef = useRef<HTMLElement>(null);
+    useOverlay(props.open, dialogRef, () => { if (!progress) props.onClose(); });
+
+    useEffect(() => {
+        if (props.open) return;
+        if (createdTaskId.current) resetSingle();
+        setError(undefined);
+        setWarning(undefined);
+    }, [props.open]);
 
     useEffect(() => {
         if (!props.open) return;
         const previousOverflow = document.body.style.overflow;
         document.body.style.overflow = "hidden";
         nameRef.current?.focus();
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape" && !progress) props.onClose();
-        };
-        window.addEventListener("keydown", onKeyDown);
         return () => {
             document.body.style.overflow = previousOverflow;
-            window.removeEventListener("keydown", onKeyDown);
         };
-    }, [props.open, progress, props.onClose]);
+    }, [props.open]);
 
     useEffect(() => {
         if (!props.open) return;
@@ -75,13 +81,8 @@ export function TaskCreateDialog(props: {
         };
     }, [props.open]);
 
-    if (!props.open) return null;
-
-    function runnerReady(task: Task): boolean {
-        return task.bridgeMode === "host-codex-broker" || (task.status === "running" && Boolean(task.activeProvisioningIntentId));
-    }
-
     function resetSingle(): void {
+        createdTaskId.current = undefined;
         setPrompt("");
         setName("");
         setAttachments([]);
@@ -93,15 +94,25 @@ export function TaskCreateDialog(props: {
         props.onClose();
     }
 
+    function publish(task: Task) {
+        props.onSelect(task.id);
+        try {
+            Promise.resolve(props.onCreated([task])).catch((err) => {
+                setWarning(`Task saved; refreshing the task list failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+        } catch (err) {
+            setWarning(`Task saved; refreshing the task list failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
     async function createDraft() {
         try {
             setError(undefined);
             setWarning(undefined);
             setProgress("Creating draft...");
             const task = await api.createTask({ prompt, name, backend, codexSettings: settings, attachments: await filesToAttachments(attachments) });
-            props.onSelect(task.id);
-            await props.onCreated();
             complete();
+            publish(task);
         } catch (err) {
             setProgress(undefined);
             setError(err instanceof Error ? `Creating task failed: ${err.message}` : String(err));
@@ -109,31 +120,22 @@ export function TaskCreateDialog(props: {
     }
 
     async function createAndRun() {
-        let phase = "Creating task";
         try {
             setError(undefined);
             setWarning(undefined);
-            setProgress(`${phase}...`);
-            const task = await api.createTask({ prompt, name, backend, codexSettings: settings, attachments: await filesToAttachments(attachments) });
-            props.onSelect(task.id);
-            await props.onCreated();
-            phase = "Starting runner";
-            setProgress(`${phase}...`);
-            const started = await api.start(task.id);
-            await props.onCreated();
-            if (!runnerReady(started)) {
-                setWarning("Runner is not ready yet; Codex has not been called.");
-                setProgress(undefined);
-                return;
+            setProgress("Accepting run...");
+            if (!createdTaskId.current) {
+                const task = await api.createTask({ prompt, name, backend, codexSettings: settings, attachments: await filesToAttachments(attachments) });
+                createdTaskId.current = task.id;
+                publish(task);
             }
-            phase = "Calling Codex";
-            setProgress(`${phase}...`);
-            await api.prompt(task.id, prompt);
-            await props.onCreated();
+            const id = createdTaskId.current;
+            const accepted = await api.start(id);
             complete();
+            publish(accepted);
         } catch (err) {
             setProgress(undefined);
-            setError(err instanceof Error ? `${phase} failed: ${err.message}` : String(err));
+            setError(err instanceof Error ? `Accepting run failed: ${err.message}` : String(err));
         }
     }
 
@@ -182,9 +184,8 @@ export function TaskCreateDialog(props: {
             for (const challenge of manifest.challenges) {
                 const task = await api.createTask(await challengeToRequest(manifest, challenge, manifestFiles));
                 created += 1;
-                props.onSelect(task.id);
+                publish(task);
             }
-            await props.onCreated();
             setBatchStatus(`Created ${created} challenge task${created === 1 ? "" : "s"}.`);
             setProgress(undefined);
         } catch (err) {
@@ -193,9 +194,11 @@ export function TaskCreateDialog(props: {
         }
     }
 
+    if (!props.open) return null;
+
     return (
         <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !progress && props.onClose()}>
-            <section className="task-dialog" role="dialog" aria-modal="true" aria-labelledby="new-task-title">
+            <section ref={dialogRef} className="task-dialog" role="dialog" aria-modal="true" aria-labelledby="new-task-title" tabIndex={-1}>
                 <header className="dialog-header">
                     <div>
                         <span className="eyebrow">Task intake</span>
@@ -210,11 +213,11 @@ export function TaskCreateDialog(props: {
                 {tab === "single" ? (
                     <div className="dialog-body" role="tabpanel" aria-label="Single task">
                         <div className="field-grid two-column">
-                            <label className="field"><span>Task name</span><input ref={nameRef} value={name} onChange={(event) => setName(event.target.value)} placeholder="Task name" /></label>
-                            <label className="field"><span>Runner</span><select value={backend} onChange={(event) => setBackend(event.target.value as Task["backend"])}><option value="local">Local appserver</option><option value="digitalocean">DigitalOcean dry-run</option></select></label>
+                            <label className="field"><span>Task name</span><input ref={nameRef} disabled={Boolean(createdTaskId.current)} value={name} onChange={(event) => setName(event.target.value)} placeholder="Task name" /></label>
+                            <label className="field"><span>Runner</span><select disabled={Boolean(createdTaskId.current)} value={backend} onChange={(event) => setBackend(event.target.value as Task["backend"])}><option value="local">Local appserver</option><option value="digitalocean">DigitalOcean dry-run</option></select></label>
                         </div>
-                        <label className="field"><span>Initial prompt</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Initial prompt" /></label>
-                        <fieldset className="settings-panel">
+                        <label className="field"><span>Initial prompt</span><textarea disabled={Boolean(createdTaskId.current)} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Initial prompt" /></label>
+                        <fieldset className="settings-panel" disabled={Boolean(createdTaskId.current)}>
                             <legend>Codex settings</legend>
                             <div className="field-grid two-column">
                                 <div className="field model-field">
@@ -244,8 +247,9 @@ export function TaskCreateDialog(props: {
                                 <span>Capabilities are dropped, privilege escalation is blocked, resources are capped, and mounts are narrow. The default network is still open and task-local Codex authentication is readable inside the runner. This is a practical CTF baseline, not protection against suspected container escapes or hostile kernel payloads.</span>
                             </div>
                         </fieldset>
-                        <label className="file-drop"><span>Attach files</span><small>{attachments.length ? `${attachments.length} file${attachments.length === 1 ? "" : "s"} selected` : "Drop-in artifacts are copied into task storage"}</small><input aria-label="Attach files" type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} /></label>
-                        <div className="dialog-actions"><button onClick={props.onClose} disabled={Boolean(progress)}>Cancel</button><button onClick={createDraft} disabled={Boolean(progress)}>Create Draft</button><button className="button-primary" onClick={createAndRun} disabled={Boolean(progress) || !prompt.trim()}>Create &amp; Run</button></div>
+                        <label className="file-drop"><span>Attach files</span><small>{attachments.length ? `${attachments.length} file${attachments.length === 1 ? "" : "s"} selected` : "Drop-in artifacts are copied into task storage"}</small><input aria-label="Attach files" disabled={Boolean(createdTaskId.current)} type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} /></label>
+                        {createdTaskId.current && <p>Task created. Retry Create &amp; Run to start the saved task.</p>}
+                        <div className="dialog-actions"><button onClick={props.onClose} disabled={Boolean(progress)}>Cancel</button><button onClick={createDraft} disabled={Boolean(progress) || Boolean(createdTaskId.current)}>Create Draft</button><button className="button-primary" onClick={createAndRun} disabled={Boolean(progress) || !prompt.trim()}>Create &amp; Run</button></div>
                     </div>
                 ) : (
                     <div className="dialog-body" role="tabpanel" aria-label="Batch import">

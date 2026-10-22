@@ -8,7 +8,7 @@ export class Reaper {
     constructor(
         private readonly db: WebuiDatabase,
         private readonly config: WebuiConfig,
-        private readonly scheduler: Scheduler
+        private readonly scheduler: Pick<Scheduler, "emit" | "destroyTask">
     ) {}
 
     start(intervalMs = 60_000): void {

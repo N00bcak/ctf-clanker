@@ -134,7 +134,7 @@ export class CodexAppServerBridge {
         private readonly spawnAppServer: AppServerSpawner = defaultAppServerSpawner
     ) {}
 
-    async run(task: CodexTask, handle: RunnerHandle, userPrompt: string, onOutput: (text: string) => void): Promise<void> {
+    async run(task: CodexTask, handle: RunnerHandle, userPrompt: string, onOutput: (text: string) => void): Promise<string> {
         if (task.credentialMode !== "codex-auth-json") {
             throw new Error(`native Codex app-server requires codex-auth-json credential mode, got ${task.credentialMode}`);
         }
@@ -153,15 +153,20 @@ export class CodexAppServerBridge {
         this.lastState.set(task.id, { state: "active" });
 
         try {
-            const exitCode = await this.runJsonRpcSession(child, task, prompt, userPrompt, onOutput);
-            updateBridgeContext(task, userPrompt, exitCode, this.redactor);
-            scrubTaskCodexHome(task);
+            const { exitCode, finalText } = await this.runJsonRpcSession(child, task, prompt, userPrompt, onOutput);
+            if (this.active.get(task.id) !== child) return "";
+            if (task.codexRuntime === "droplet") this.db.mergeProviderState(task.id, { lastTurnExitCode: exitCode });
+            else updateBridgeContext(task, userPrompt, exitCode, this.redactor);
+            scrubTaskCodexHome(task, true);
             if (exitCode !== 0) {
                 throw new Error(`codex app-server exited with ${exitCode}`);
             }
+            return finalText;
         } finally {
-            this.active.delete(task.id);
-            this.lastState.set(task.id, { state: "closed" });
+            if (this.active.get(task.id) === child) {
+                this.active.delete(task.id);
+                this.lastState.set(task.id, { state: "closed" });
+            }
             if (!child.killed) {
                 child.kill();
             }
@@ -193,7 +198,9 @@ export class CodexAppServerBridge {
         prompt: string,
         userPrompt: string,
         onOutput: (text: string) => void
-    ): Promise<number> {
+    ): Promise<{ exitCode: number; finalText: string }> {
+        const closed = new Promise<number>(resolve => child.on("close", code => resolve(code ?? -1)));
+        let finalText = "";
         let requestId = 0;
         const deferred: Array<Record<string, unknown>> = [];
         const streamedAgentMessageIds = new Set<string>();
@@ -221,6 +228,7 @@ export class CodexAppServerBridge {
 
         const readStdoutMessage = async (): Promise<Record<string, unknown> | undefined> => {
             const result = await lineIterator.next();
+            if (this.active.get(task.id) !== child) throw new Error("Codex execution cancelled");
             if (result.done) {
                 return undefined;
             }
@@ -238,6 +246,7 @@ export class CodexAppServerBridge {
         };
 
         const nextMessage = async (): Promise<Record<string, unknown> | undefined> => {
+            if (this.active.get(task.id) !== child) throw new Error("Codex execution cancelled");
             if (deferred.length) {
                 return deferred.shift();
             }
@@ -307,7 +316,9 @@ export class CodexAppServerBridge {
             sandboxPolicy,
             ...(settings.model ? { model: settings.model } : {})
         });
-        await readResponse(turnId);
+        const turnResponse = await readResponse(turnId);
+        const submittedTurn = turnResponse.turn as { id?: string } | undefined;
+        if (!submittedTurn?.id) throw new Error("Codex app-server did not return a turn id");
 
         while (true) {
             const message = await nextMessage();
@@ -342,6 +353,7 @@ export class CodexAppServerBridge {
             if (method === "item/started" || method === "item/completed") {
                 const item = params.item && typeof params.item === "object" ? params.item as Record<string, unknown> : {};
                 const itemId = String(item.id ?? "");
+                if (method === "item/completed" && item.type === "agentMessage") finalText = String(item.text ?? "");
                 if (method === "item/completed" && item.type === "agentMessage" && (itemId ? streamedAgentMessageIds.has(itemId) : streamedUnnamedAgentMessage)) {
                     continue;
                 }
@@ -364,26 +376,24 @@ export class CodexAppServerBridge {
                 continue;
             }
             if (method === "turn/completed") {
+                const turn = params.turn as { id?: string; status?: string; error?: unknown } | undefined;
+                if (turn?.id !== submittedTurn.id) continue;
+                if (turn?.status === "failed" || turn?.status === "interrupted") throw new Error(`Codex turn ${turn.status}: ${JSON.stringify(turn.error ?? "")}`);
                 break;
             }
-            if (method === "thread/status/changed") {
-                const status = params.status && typeof params.status === "object" ? params.status as Record<string, unknown> : {};
-                if (status.type === "idle") {
-                    break;
-                }
-            }
+
         }
 
         child.stdin.end();
-        return await new Promise<number>((resolve) => {
-            child.on("close", (code) => resolve(code ?? 0));
+        const exitCode = await Promise.race([closed, new Promise<number>((resolve) => {
             setTimeout(() => {
                 if (!child.killed) {
                     child.kill();
                 }
                 resolve(0);
             }, 1000).unref();
-        });
+        })]);
+        return { exitCode, finalText };
     }
 
     private emitOutput(task: CodexTask, outputPath: string, stream: string, text: string, onOutput: (text: string) => void): void {

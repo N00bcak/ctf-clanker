@@ -29,11 +29,12 @@ export function prepareTaskCodexAuth(task: CodexTask, config: WebuiConfig): void
     fs.chmodSync(target, 0o600);
 }
 
-export function scrubTaskCodexHome(task: CodexTask): void {
+export function scrubTaskCodexHome(task: CodexTask, preserveSessions = false): void {
     if (task.codexHomeRetention !== "purge-after-run") {
         return;
     }
     for (const name of ["sessions", "history.jsonl", "logs", "codex.log"]) {
+        if (preserveSessions && name === "sessions") continue;
         fs.rmSync(path.join(task.codexHomePath, name), { recursive: true, force: true });
     }
 }

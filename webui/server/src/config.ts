@@ -39,17 +39,14 @@ export function validateServerExposure(config: WebuiConfig, env = process.env): 
 }
 
 export function validateNetworkMode(mode: NetworkMode, enforcement: NetworkEnforcement): void {
-    if (mode === "open" && enforcement === "open-warning") {
-        return;
-    }
-    if (mode === "none" && enforcement === "docker-none") {
-        return;
-    }
-    if (mode === "codex-only" && !["sidecar-proxy", "host-firewall", "broker"].includes(enforcement)) {
-        throw new Error("network.mode codex-only requires real egress enforcement");
-    }
-    if (mode === "proxy-allowlist" && enforcement !== "sidecar-proxy") {
-        throw new Error("network.mode proxy-allowlist requires sidecar-proxy enforcement");
+    const allowed: Record<NetworkMode, NetworkEnforcement[]> = {
+        open: ["open-warning"], none: ["docker-none"],
+        "codex-only": ["sidecar-proxy", "host-firewall", "broker"], "proxy-allowlist": ["sidecar-proxy"]
+    };
+    const choices = Object.hasOwn(allowed, mode) ? allowed[mode] : undefined;
+    if (!choices?.includes(enforcement)) {
+        if (mode === "codex-only") throw new Error("network.mode codex-only requires real egress enforcement");
+        throw new Error(`network.mode ${mode} requires ${choices?.join(" or ") ?? "a supported network mode"}`);
     }
 }
 

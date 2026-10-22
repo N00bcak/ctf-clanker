@@ -23,7 +23,7 @@ export function enforceAttachmentLimits(attachments: AttachmentInput[], config: 
     }
 }
 
-export function directorySizeBytes(root: string): number {
+export function directorySizeBytes(root: string, seen = new Set<string>()): number {
     if (!fs.existsSync(root)) {
         return 0;
     }
@@ -32,12 +32,15 @@ export function directorySizeBytes(root: string): number {
         return 0;
     }
     if (stat.isFile()) {
+        const identity = `${stat.dev}:${stat.ino}`;
+        if (seen.has(identity)) return 0;
+        seen.add(identity);
         return stat.size;
     }
     if (!stat.isDirectory()) {
         return 0;
     }
-    return fs.readdirSync(root).reduce((total, entry) => total + directorySizeBytes(path.join(root, entry)), 0);
+    return fs.readdirSync(root).reduce((total, entry) => total + directorySizeBytes(path.join(root, entry), seen), 0);
 }
 
 export function enforceTaskQuota(taskRoot: string, config: WebuiConfig, incomingBytes = 0): void {

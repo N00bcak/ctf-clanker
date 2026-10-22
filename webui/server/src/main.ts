@@ -8,9 +8,11 @@ import { loadConfig, WEBUI_ROOT } from "./config.js";
 import { WebuiDatabase } from "./db.js";
 import { createTask } from "./tasks/createTask.js";
 import { deleteFile, listFiles, readFile, writeFile } from "./tasks/fileBrowser.js";
-import { readPermissions, writePermissions } from "./tasks/permissions.js";
+import { readPermissions, saveTaskPermissions, supportedNetworkModes, type TaskPermissions } from "./tasks/permissions.js";
+import { workspaceSnapshotPath } from "./providers/workspaceTransfer.js";
 import { LocalDockerProvider } from "./providers/LocalDockerProvider.js";
 import { DigitalOceanProvider } from "./providers/DigitalOceanProvider.js";
+import { ExecutionQueue } from "./executionQueue.js";
 import { Scheduler } from "./scheduler.js";
 import { Reaper } from "./reaper.js";
 import { EventBus } from "./utils/logs.js";
@@ -24,11 +26,12 @@ import type { CodexTask, CreateTaskInput, WebuiConfig, WorkStatus } from "./type
 import type { RunnerProvider } from "./providers/Provider.js";
 
 export interface HostCodexRunner {
-    run(task: CodexTask, userPrompt: string, onOutput: (text: string) => void): Promise<void>;
+    run(task: CodexTask, userPrompt: string, onOutput: (text: string) => void): Promise<string | void>;
+    stop?(taskId: string): void | Promise<void>;
 }
 
 export interface NativeCodexRunner {
-    run(task: CodexTask, handle: import("./types.js").RunnerHandle, userPrompt: string, onOutput: (text: string) => void): Promise<void>;
+    run(task: CodexTask, handle: import("./types.js").RunnerHandle, userPrompt: string, onOutput: (text: string) => void): Promise<string | void>;
     stop(taskId: string): void;
     state(taskId: string): { state: "not-started" | "active" | "closed" };
 }
@@ -82,10 +85,30 @@ export async function buildServer(options: BuildServerOptions = {}) {
     const codexPty = options.codexPty ?? new CodexPtySessionManager(config, redactor, events);
     const nativeCodex = options.nativeCodex ?? new CodexAppServerBridge(config, redactor, db);
     const codexModels = options.codexModels ?? new CodexModelCatalog(config);
-    const scheduler = new Scheduler(db, providers, config, events, redactor, (taskId) => nativeCodex.stop(taskId));
     const hostCodex = options.hostCodex ?? new HostCodexCliBridge(config, redactor);
-    const reaper = new Reaper(db, config, scheduler);
+    const scheduler = new Scheduler(db, providers, config, events, redactor, async (taskId) => {
+        nativeCodex.stop(taskId);
+        await hostCodex.stop?.(taskId);
+        codexPty.stop(taskId);
+    });
+    const queue = new ExecutionQueue(db, scheduler, config, async (task, prompt, isCurrent) => {
+        scheduler.emit(task, "codex.session.started");
+        try {
+            const output = (text: string) => {
+                if (isCurrent()) scheduler.emit(task, "codex.output", { text });
+            };
+            if (task.bridgeMode === "host-codex-broker") return await hostCodex.run(task, prompt, output);
+            const handle = scheduler.getHandle(task);
+            if (!handle) throw new Error("runner not ready");
+            return await nativeCodex.run(task, handle, prompt, output);
+        } finally {
+            if (isCurrent()) scheduler.emit(task, "codex.session.closed");
+        }
+    });
+    const reaper = new Reaper(db, config, { emit: scheduler.emit.bind(scheduler), destroyTask: queue.destroy.bind(queue) });
     const app = fastify({ logger: false });
+    app.addHook("onReady", () => queue.recover());
+    app.addHook("onClose", async () => { reaper.stop(); await queue.close(); });
 
     await app.register(websocket);
     await app.register(multipart, {
@@ -110,7 +133,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
     });
 
     app.setErrorHandler((error, _request, reply) => {
-        reply.code(400).send({ error: redactor.redact(error instanceof Error ? error.message : String(error)) });
+        const statusCode = (error as { statusCode?: number }).statusCode;
+        reply.code(statusCode && statusCode >= 400 && statusCode < 500 ? statusCode : 400).send({ error: redactor.redact(error instanceof Error ? error.message : String(error)) });
     });
 
     app.post("/api/tasks", async (request, reply) => {
@@ -138,19 +162,19 @@ export async function buildServer(options: BuildServerOptions = {}) {
         return { prompt: fs.readFileSync(task.initialPromptPath, "utf8") };
     });
 
-    app.post("/api/tasks/:id/start", async (request) => {
+    app.post("/api/tasks/:id/start", async (request, reply) => {
         const { id } = request.params as { id: string };
-        return scheduler.startTask(id);
+        return reply.code(202).send(queue.enqueue(id));
     });
 
     app.post("/api/tasks/:id/stop", async (request) => {
         const { id } = request.params as { id: string };
-        return scheduler.stopTask(id);
+        return queue.stop(id);
     });
 
     app.post("/api/tasks/:id/destroy", async (request) => {
         const { id } = request.params as { id: string };
-        return scheduler.destroyTask(id);
+        return queue.destroy(id);
     });
 
     app.get("/api/tasks/:id/codex-session", async (request) => {
@@ -169,84 +193,85 @@ export async function buildServer(options: BuildServerOptions = {}) {
         if (!body.workStatus || !allowed.includes(body.workStatus)) {
             throw new Error("invalid work status");
         }
+        if (body.workStatus === "done" || body.workStatus === "failed") return queue.stop(id, body.workStatus);
         db.updateWorkStatus(id, body.workStatus);
         return db.getTask(id);
     });
 
-    app.post("/api/tasks/:id/prompt", async (request) => {
+    app.post("/api/tasks/:id/prompt", async (request, reply) => {
         const { id } = request.params as { id: string };
         const body = request.body as { prompt?: string };
-        const task = db.getTask(id);
-        if (!task) throw new Error("task not found");
-        if (!body.prompt) throw new Error("prompt is required");
-        if (task.bridgeMode === "host-codex-broker") {
-            await hostCodex.run(task, body.prompt, (text) => {
-                scheduler.emit(task, "codex.output", { text });
-            });
-            if (task.workStatus !== "done") {
-                db.updateWorkStatus(id, "running");
-            }
-            db.updateTaskStatus(id, "idle");
-            return db.getTask(id);
-        }
-        const handle = scheduler.getHandle(task);
-        if (!handle) throw new Error("runner not ready");
-        if (task.status !== "running") throw new Error("runner not running");
-        try {
-            scheduler.emit(task, "codex.session.started");
-            await nativeCodex.run(task, handle, body.prompt, (text) => {
-                scheduler.emit(task, "codex.output", { text });
-            });
-        } catch (error) {
-            db.updateWorkStatus(id, "failed");
-            throw error;
-        } finally {
-            scheduler.emit(task, "codex.session.closed");
-        }
-        if (task.workStatus !== "done") {
-            db.updateWorkStatus(id, "running");
-        }
-        db.updateTaskStatus(id, "running");
-        return db.getTask(id);
+        if (typeof body.prompt !== "string" || !body.prompt.trim()) throw new Error("prompt is required");
+        return reply.code(202).send(queue.enqueue(id, body.prompt));
     });
 
-    app.patch("/api/tasks/:id/permissions", async (request) => {
+    function permissionEditable(task: CodexTask): boolean {
+        return !db.hasOpenExecution(task.id) && !["queued", "provisioning", "running", "collecting", "destroying", "orphaned"].includes(task.status)
+            && task.workspaceSync?.owner !== "remote" && !["uploading", "syncing"].includes(task.workspaceSync?.state ?? "idle");
+    }
+
+    app.get("/api/tasks/:id/permissions", async (request) => {
         const { id } = request.params as { id: string };
         const task = db.getTask(id);
         if (!task) throw new Error("task not found");
-        const filePath = path.join(path.dirname(task.storagePath), "permissions.yaml");
-        writePermissions(filePath, request.body as never, config);
-        return readPermissions(filePath, config);
+        const editable = permissionEditable(task);
+        return { permissions: readPermissions(path.join(path.dirname(task.storagePath), "permissions.yaml"), config),
+            supportedNetworkModes: supportedNetworkModes(task), editable,
+            ...(!editable ? { reason: "Stop must finish before changing permissions." } : {}) };
     });
+
+    app.patch("/api/tasks/:id/permissions", async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const task = db.getTask(id);
+        if (!task) throw new Error("task not found");
+        if (!permissionEditable(task)) return reply.code(409).send({ error: "Stop must finish before changing permissions." });
+        saveTaskPermissions(task, request.body as TaskPermissions, config, db);
+        scheduler.emit(db.getTask(id)!, "permissions.saved");
+        return readPermissions(path.join(path.dirname(task.storagePath), "permissions.yaml"), config);
+    });
+
+    function fileReadTask(task: CodexTask): CodexTask {
+        return task.workspaceSync?.owner === "remote" && task.workspaceSync.generation
+            ? { ...task, storagePath: workspaceSnapshotPath(task, task.workspaceSync.generation) } : task;
+    }
+
+    function cloudFilesLocked(task: CodexTask): boolean {
+        return task.codexRuntime === "droplet" && (db.hasOpenExecution(task.id) || task.workspaceSync?.owner === "remote"
+            || ["uploading", "syncing"].includes(task.workspaceSync?.state ?? "idle"));
+    }
 
     app.get("/api/tasks/:id/files", async (request) => {
         const { id } = request.params as { id: string };
         const task = db.getTask(id);
         if (!task) throw new Error("task not found");
-        return listFiles(task, (request.query as { path?: string }).path ?? "");
+        return listFiles(fileReadTask(task), (request.query as { path?: string }).path ?? "");
     });
 
     app.get("/api/tasks/:id/files/*", async (request, reply) => {
         const { id, "*": filePath } = request.params as { id: string; "*": string };
         const task = db.getTask(id);
         if (!task) throw new Error("task not found");
-        const buffer = readFile(task, filePath);
+        const buffer = readFile(fileReadTask(task), filePath);
         return reply.type("application/octet-stream").send(buffer);
     });
 
-    app.put("/api/tasks/:id/files/*", async (request) => {
+    app.put("/api/tasks/:id/files/*", async (request, reply) => {
         const { id, "*": filePath } = request.params as { id: string; "*": string };
         const task = db.getTask(id);
         if (!task) throw new Error("task not found");
         const body = request.body === undefined ? await rawBodyToBuffer(request.raw) : bodyToBuffer(request.body);
-        writeFile(task, filePath, body, config);
+        const current = db.getTask(id);
+        if (!current) throw new Error("task not found");
+        if (cloudFilesLocked(current)) return reply.code(409).send({ error: "Cloud files are read-only until execution and final collection finish." });
+        writeFile(current, filePath, body, config);
         return { ok: true };
     });
 
-    app.delete("/api/tasks/:id/files/*", async (request) => {
+    app.delete("/api/tasks/:id/files/*", async (request, reply) => {
         const { id, "*": filePath } = request.params as { id: string; "*": string };
         const task = db.getTask(id);
         if (!task) throw new Error("task not found");
+        if (cloudFilesLocked(task)) return reply.code(409).send({ error: "Cloud files are read-only until execution and final collection finish." });
         deleteFile(task, filePath);
         return { ok: true };
     });

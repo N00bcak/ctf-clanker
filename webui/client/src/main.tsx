@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
@@ -6,6 +6,7 @@ import { api, type Task } from "./api";
 import { TaskCreateDialog } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
 import { TaskView } from "./TaskView";
+import { useMediaQuery, useOverlay } from "./useOverlay";
 
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 560;
@@ -19,10 +20,16 @@ function clampSidebarWidth(value: number): number {
 
 export function App() {
     const [tasks, setTasks] = useState<Task[]>([]);
-    const [selectedId, setSelectedId] = useState<string | undefined>();
+    const [selectedId, setSelectedId] = useState<string | undefined>(() => new URLSearchParams(window.location.search).get("task") ?? undefined);
     const [createOpen, setCreateOpen] = useState(false);
     const [error, setError] = useState<string | undefined>();
     const [sidebarOpen, setSidebarOpen] = useState(() => window.localStorage.getItem(SIDEBAR_OPEN_KEY) !== "false");
+    const mobile = useMediaQuery("(max-width: 767px)");
+    const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+    const queueOpen = mobile ? mobileSidebarOpen : sidebarOpen;
+    const sidebarRef = useRef<HTMLElement>(null);
+    const refreshGeneration = useRef(0);
+    useOverlay(mobile && mobileSidebarOpen && !createOpen, sidebarRef, () => setMobileSidebarOpen(false));
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
         return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : SIDEBAR_DEFAULT;
@@ -32,10 +39,28 @@ export function App() {
     const runningCount = tasks.filter((task) => task.workStatus === "running").length;
 
     async function refresh() {
-        const next = await api.tasks();
-        setTasks(next);
-        setSelectedId((current) => current && next.some((task) => task.id === current) ? current : next[0]?.id);
-        setError(undefined);
+        const generation = ++refreshGeneration.current;
+        try {
+            const next = await api.tasks();
+            if (generation !== refreshGeneration.current) return;
+            setTasks(next);
+            setSelectedId((current) => current && next.some((task) => task.id === current) ? current : next[0]?.id);
+            setError(undefined);
+        } catch (err) {
+            if (generation === refreshGeneration.current) setError(err instanceof Error ? err.message : String(err));
+        }
+    }
+
+    function selectTask(id: string) {
+        setSelectedId(id);
+        setMobileSidebarOpen(false);
+    }
+
+    function createdTasks(created: Task[]) {
+        ++refreshGeneration.current;
+        setTasks((current) => [...created.slice().reverse(), ...current.filter((task) => !created.some((item) => item.id === task.id))]);
+        if (created.length) selectTask(created[created.length - 1].id);
+        void refresh();
     }
 
     function startSidebarResize(event: React.MouseEvent<HTMLDivElement>): void {
@@ -54,6 +79,10 @@ export function App() {
     }
 
     function toggleSidebar(): void {
+        if (mobile) {
+            setMobileSidebarOpen((current) => !current);
+            return;
+        }
         setSidebarOpen((current) => {
             const open = !current;
             window.localStorage.setItem(SIDEBAR_OPEN_KEY, String(open));
@@ -62,18 +91,21 @@ export function App() {
     }
 
     useEffect(() => {
-        refresh().catch((err) => setError(err.message));
-        const interval = setInterval(() => refresh().catch((err) => setError(err.message)), 5000);
-        return () => clearInterval(interval);
+        void refresh();
+        const interval = setInterval(() => void refresh(), 5000);
+        return () => {
+            clearInterval(interval);
+            ++refreshGeneration.current;
+        };
     }, []);
 
     return (
-        <main className={sidebarOpen ? "app" : "app sidebar-collapsed"} style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
+        <main className={queueOpen ? "app" : "app sidebar-collapsed"} style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
             <header className="app-bar">
                 <div className="brand-lockup">
                     <span className="brand-mark" aria-hidden="true">M</span>
                     <div><strong>MECHA</strong><span>OPERATIONS CONSOLE</span></div>
-                    <button className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "Collapse task queue" : "Expand task queue"} aria-expanded={sidebarOpen} onClick={toggleSidebar}>{sidebarOpen ? "‹" : "›"}</button>
+                    <button className="icon-button sidebar-toggle" aria-label={queueOpen ? "Collapse task queue" : "Expand task queue"} aria-expanded={queueOpen} onClick={toggleSidebar}>{queueOpen ? "‹" : "›"}</button>
                 </div>
                 <div className="fleet-status" aria-label="Fleet status">
                     <span><i className="status-light status-light-running" />{runningCount} running</span>
@@ -82,14 +114,15 @@ export function App() {
                 </div>
                 <button className="button-primary new-task-button" onClick={() => setCreateOpen(true)}><span aria-hidden="true">＋</span> New Task</button>
             </header>
-            <aside className="sidebar">
+            <aside ref={sidebarRef} className="sidebar" role={mobile && queueOpen ? "dialog" : undefined} aria-modal={mobile && queueOpen ? true : undefined} aria-label="Task queue drawer" tabIndex={-1}>
                 <div className="sidebar-heading"><span className="eyebrow">Task fleet</span><strong>Operations queue</strong></div>
-                {error && <div className="error">{error}</div>}
-                <TaskList tasks={tasks} selectedId={selected?.id} onSelect={setSelectedId} />
+                <TaskList tasks={tasks} selectedId={selected?.id} onSelect={selectTask} />
             </aside>
+            {mobile && queueOpen && <button className="queue-scrim" aria-label="Close task queue overlay" onClick={() => setMobileSidebarOpen(false)} />}
             <div aria-label="Resize task queue" aria-orientation="vertical" className="sidebar-resizer" role="separator" onMouseDown={startSidebarResize} />
             <section className="workspace">
-                {selected ? <TaskView task={selected} onChanged={refresh} /> : (
+                {error && <div className="error app-error" role="alert">Refreshing tasks failed: {error}</div>}
+                {selected ? <TaskView key={selected.id} task={selected} onChanged={refresh} /> : (
                     <div className="empty-state">
                         <span className="brand-mark large" aria-hidden="true">M</span>
                         <h1>No active operation</h1>
@@ -98,7 +131,7 @@ export function App() {
                     </div>
                 )}
             </section>
-            <TaskCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={refresh} onSelect={setSelectedId} />
+            <TaskCreateDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={createdTasks} onSelect={selectTask} />
         </main>
     );
 }

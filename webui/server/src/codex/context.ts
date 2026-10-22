@@ -13,6 +13,13 @@ export function buildCodexPrompt(task: CodexTask, userPrompt: string, runtimeNot
 
 ${userPrompt}
 
+## Completion Report
+
+When you have solved the challenge, or cannot make further progress with the available evidence, end your turn and yield control to the next queued task. Do not wait indefinitely or claim success when uncertain.
+Your final assistant message must be a JSON object (no surrounding prose):
+{"outcome":"solved" or "unresolved","summary":"brief evidence or blocker","flag":"recovered flag; omit when unresolved"}
+Use solved only when you recovered the flag. Record useful detail in NOTES.md before the final report.
+
 ## Runtime Boundary
 
 ${runtimeNote}

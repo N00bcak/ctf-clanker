@@ -62,7 +62,10 @@ h1, h2, h3, p { margin-top: 0; }
 .sidebar-resizer { cursor: col-resize; background: #101a24; border-right: 1px solid var(--border); }
 .sidebar-resizer:hover { background: var(--cyan); }
 .sidebar-toggle { flex: 0 0 auto; margin-left: auto; width: 27px; height: 27px; font-size: 18px; }
-.workspace { min-width: 0; min-height: 0; overflow: hidden; background: radial-gradient(circle at 80% 0%, rgba(53, 194, 255, 0.04), transparent 30%), var(--bg); }
+.workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: radial-gradient(circle at 80% 0%, rgba(53, 194, 255, 0.04), transparent 30%), var(--bg); }
+.workspace > .task-view, .workspace > .empty-state { flex: 1; height: auto; }
+.app-error { flex: 0 0 auto; margin: 8px 12px; }
+.queue-scrim { display: none; }
 
 .task-queue { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .queue-search { display: flex; align-items: center; gap: 7px; margin: 12px 12px 8px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: #0a1017; padding-left: 10px; }
@@ -167,6 +170,9 @@ kbd { display: inline-grid; place-items: center; min-width: 17px; height: 17px; 
 .pane-heading { display: flex; justify-content: space-between; align-items: center; }
 .pane-heading > div { display: grid; gap: 4px; }
 .pane-heading > span { color: var(--muted); font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.file-tools { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; }
+.file-tools button { padding: 4px 7px; font-size: 11px; }
+.snapshot-status { margin: 0; }
 .pane-empty { padding: 24px 8px; color: var(--muted); text-align: center; font-size: 11px; }
 .breadcrumbs { display: flex; align-items: center; gap: 3px; overflow-x: auto; border: 1px solid var(--border); border-radius: 5px; background: #0a1017; padding: 5px; white-space: nowrap; }
 .breadcrumbs span { display: flex; align-items: center; gap: 3px; }
@@ -252,6 +258,46 @@ kbd { display: inline-grid; place-items: center; min-width: 17px; height: 17px; 
     .fleet-status span:last-child { display: none; }
     .task-identity { flex-wrap: wrap; }
     .task-identity h1, .task-id { max-width: 260px; }
+}
+
+@media (max-width: 767px) {
+    .app, .app.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+    .app .app-bar { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 0 10px; }
+    .brand-lockup { min-width: 0; gap: 8px; }
+    .brand-lockup > div { min-width: 0; }
+    .brand-lockup span:not(.brand-mark) { font-size: 7px; letter-spacing: 0.06em; }
+    .fleet-status, .sidebar-resizer { display: none; }
+    .sidebar { position: fixed; left: 0; top: 52px; bottom: 0; width: min(300px, calc(100vw - 48px)); z-index: 70; box-shadow: 20px 0 60px rgba(0, 0, 0, 0.45); }
+    .queue-scrim { display: block; position: fixed; inset: 52px 0 0; width: 100%; height: calc(100% - 52px); padding: 0; border: 0; border-radius: 0; background: rgba(2, 5, 8, 0.6); z-index: 65; }
+    .workspace { grid-column: 1; }
+    .task-header { padding: 10px; }
+    .task-identity { gap: 8px; }
+    .task-identity h1, .task-id { max-width: min(260px, calc(100vw - 110px)); }
+    .actions { flex-wrap: wrap; }
+    .work-actions { padding-left: 0; border-left: 0; }
+    .header-actions { gap: 8px; }
+    .header-actions button { padding: 6px 8px; font-size: 12px; }
+    .risk-panel { margin-left: 10px; margin-right: 10px; }
+    .risk-panel summary { flex-wrap: wrap; }
+    .risk-panel summary > span:last-child { display: none; }
+    .inspector-panel { max-width: calc(100vw - 24px); }
+    .terminal { min-height: 0; }
+    .prompt-composer { padding: 8px 10px; }
+    .prompt-composer textarea { max-height: 100px; }
+}
+
+@media (max-width: 600px) {
+    .dialog-backdrop { padding: 10px; }
+    .task-dialog { max-height: calc(100dvh - 20px); }
+    .dialog-header { padding: 12px; }
+    .dialog-tabs { padding: 8px 12px 0; }
+    .dialog-body { padding: 12px; }
+    .two-column, .batch-pickers { grid-template-columns: minmax(0, 1fr); }
+    .field-grid > *, .settings-panel, .field, .model-field { min-width: 0; }
+    .dialog-actions { flex-wrap: wrap; }
+    .dialog-actions button { flex: 1 0 auto; }
+    .confirm-dialog { max-height: calc(100dvh - 20px); overflow-y: auto; padding: 16px; }
+    .confirm-dialog h2, .confirm-dialog p { overflow-wrap: anywhere; }
 }
 
 @media (max-height: 720px) {

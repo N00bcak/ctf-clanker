@@ -403,15 +403,16 @@ describe("server routes", () => {
         const taskRoot = path.dirname(task.storagePath);
 
         const started = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
-        expect(started.statusCode).toBe(200);
-        expect(jsonBody<CodexTask>(started).status).toBe("running");
+        expect(started.statusCode).toBe(202);
+        expect(jsonBody<CodexTask>(started).status).toBe("queued");
+        await vi.waitFor(() => expect(provider.started).toBe(1));
         expect(provider.provisioned).toBe(1);
         expect(provider.started).toBe(1);
 
         const stopped = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/stop` });
         expect(stopped.statusCode).toBe(200);
         expect(jsonBody<CodexTask>(stopped).status).toBe("idle");
-        expect(provider.stopped).toBe(1);
+        expect(provider.stopped).toBeGreaterThanOrEqual(1);
         expect(nativeCodex.stopped).toContain(task.id);
 
         const destroyed = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/destroy` });
@@ -419,7 +420,7 @@ describe("server routes", () => {
         expect(jsonBody<{ ok: true; id: string }>(destroyed)).toEqual({ ok: true, id: task.id });
         expect(provider.destroyed).toBe(1);
         expect(db.getTask(task.id)).toBeUndefined();
-        expect(db.getIntent(jsonBody<CodexTask>(started).activeProvisioningIntentId!)).toBeUndefined();
+        expect(db.listOpenIntents()).toHaveLength(0);
         expect(fs.existsSync(taskRoot)).toBe(false);
     });
 
@@ -428,6 +429,7 @@ describe("server routes", () => {
         const task = await createTask(app);
         const taskRoot = path.dirname(task.storagePath);
         await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
+        await vi.waitFor(() => expect(provider.started).toBe(1));
         provider.destroyError = new Error("docker rm failed");
 
         const destroyed = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/destroy` });
@@ -435,7 +437,7 @@ describe("server routes", () => {
         expect(destroyed.statusCode).toBe(400);
         expect(jsonBody<{ error: string }>(destroyed).error).toContain("docker rm failed");
         expect(provider.destroyed).toBe(1);
-        expect(db.getTask(task.id)?.status).toBe("running");
+        expect(db.getTask(task.id)?.status).toBe("idle");
         expect(fs.existsSync(taskRoot)).toBe(true);
     });
 
@@ -445,9 +447,8 @@ describe("server routes", () => {
 
         const started = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
 
-        expect(started.statusCode).toBe(200);
-        expect(jsonBody<CodexTask>(started).status).toBe("idle");
-        expect(jsonBody<CodexTask>(started).activeProvisioningIntentId).toBeTruthy();
+        expect(started.statusCode).toBe(202);
+        await vi.waitFor(() => expect(fs.readFileSync(path.join(task.logsPath, "events.jsonl"), "utf8")).toContain("execution.completed"));
         const events = fs.readFileSync(path.join(task.logsPath, "events.jsonl"), "utf8");
         expect(events).toContain("runner.not_ready");
         expect(events).toContain("dry-run runner has no ssh host");
@@ -471,67 +472,46 @@ describe("server routes", () => {
         expect(db.getTask(task.id)).toBeTruthy();
     });
 
-    it("uses injected Codex app-server for native prompt routes and leaves the runner running", async () => {
-        const { app, nativeCodex } = await harness();
+    it("queues native follow-up prompts and releases the runner afterward", async () => {
+        const { app, nativeCodex, db } = await harness();
         const task = await createTask(app);
-        await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
-
-        const response = await app.inject({
-            method: "POST",
-            url: `/api/tasks/${task.id}/prompt`,
-            payload: { prompt: "continue native" }
-        });
-        expect(response.statusCode).toBe(200);
-        expect(jsonBody<CodexTask>(response).status).toBe("running");
-        expect(jsonBody<CodexTask>(response).workStatus).toBe("running");
+        const response = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/prompt`, payload: { prompt: "continue native" } });
+        expect(response.statusCode).toBe(202);
+        await vi.waitFor(() => expect(db.getTask(task.id)?.workStatus).toBe("needs-attention"));
+        expect(db.getTask(task.id)?.status).toBe("idle");
         expect(nativeCodex.prompts).toEqual(["continue native"]);
         expect(fs.readFileSync(path.join(task.logsPath, "events.jsonl"), "utf8")).toContain("native app-server output");
     });
 
-    it("does not mark native prompt running when the runner is not ready", async () => {
-        const { app, db } = await harness();
-        const task = await createTask(app);
-
-        const response = await app.inject({
-            method: "POST",
-            url: `/api/tasks/${task.id}/prompt`,
-            payload: { prompt: "too early" }
-        });
-
-        expect(response.statusCode).toBe(400);
-        expect(db.getTask(task.id)?.workStatus).toBe("not-started");
-    });
-
-    it("marks native prompt failed when app-server execution fails", async () => {
-        const { app, db, nativeCodex } = await harness();
+    it("rejects overlapping native prompts", async () => {
+        const { app, nativeCodex } = await harness();
+        vi.spyOn(nativeCodex, "run").mockImplementation(() => new Promise(() => {}));
         const task = await createTask(app);
         await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
-        nativeCodex.runError = new Error("app-server spawn failed");
-
-        const response = await app.inject({
-            method: "POST",
-            url: `/api/tasks/${task.id}/prompt`,
-            payload: { prompt: "continue native" }
-        });
-
+        const response = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/prompt`, payload: { prompt: "too early" } });
         expect(response.statusCode).toBe(400);
-        expect(jsonBody<{ error: string }>(response).error).toContain("app-server spawn failed");
-        expect(db.getTask(task.id)?.workStatus).toBe("failed");
+        expect(response.body).toContain("pending or active execution");
     });
 
-    it("uses injected host bridge for host prompt routes and emits codex output", async () => {
+    it("reports asynchronous app-server failures on the task", async () => {
+        const { app, db, nativeCodex } = await harness();
+        const task = await createTask(app);
+        nativeCodex.runError = new Error("app-server spawn failed");
+        const response = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
+        expect(response.statusCode).toBe(202);
+        await vi.waitFor(() => expect(db.getTask(task.id)?.workStatus).toBe("failed"));
+        expect(db.getTask(task.id)?.executionError).toContain("app-server spawn failed");
+        expect(db.getTask(task.id)?.status).toBe("idle");
+    });
+
+    it("uses injected host bridge for queued host prompts and emits output", async () => {
         const config = testConfig();
         config.codex.credentialMode = "host-codex-cli";
-        const { app, hostPrompts } = await harness(config);
+        const { app, hostPrompts, db } = await harness(config);
         const task = await createTask(app);
-
-        const response = await app.inject({
-            method: "POST",
-            url: `/api/tasks/${task.id}/prompt`,
-            payload: { prompt: "continue host" }
-        });
-        expect(response.statusCode).toBe(200);
-        expect(jsonBody<CodexTask>(response).workStatus).toBe("running");
+        const response = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/prompt`, payload: { prompt: "continue host" } });
+        expect(response.statusCode).toBe(202);
+        await vi.waitFor(() => expect(db.getTask(task.id)?.workStatus).toBe("needs-attention"));
         expect(hostPrompts).toEqual(["continue host"]);
         expect(fs.readFileSync(path.join(task.logsPath, "events.jsonl"), "utf8")).toContain("host bridge output");
     });
@@ -552,6 +532,7 @@ describe("server routes", () => {
         const { app, provider } = await harness();
         const task = await createTask(app);
         await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
+        await vi.waitFor(() => expect(provider.started).toBe(1));
         await app.ready();
 
         const ws = await (app as FastifyInstance & { injectWS(path: string): Promise<{ terminate(): void }> }).injectWS(`/ws/tasks/${task.id}/shell`);
@@ -565,6 +546,7 @@ describe("server routes", () => {
         const { app, provider } = await harness();
         const task = await createTask(app);
         await app.inject({ method: "POST", url: `/api/tasks/${task.id}/start` });
+        await vi.waitFor(() => expect(provider.started).toBe(1));
         await app.ready();
 
         const ws = await (app as FastifyInstance & { injectWS(path: string): Promise<{ terminate(): void }> }).injectWS(`/ws/tasks/${task.id}/shell`);

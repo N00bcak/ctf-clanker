@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { CodexTask, CreateTaskInput, WebuiConfig } from "../types.js";
 import { resolveFromRepoRoot } from "../config.js";
@@ -76,11 +77,15 @@ export function createTask(input: CreateTaskInput, config: WebuiConfig, db: Webu
         codexSettings
     };
 
-    db.withTransaction(() => {
-        generateTaskFiles(task, { ...input, attachments }, config, cacheDir);
-        enforceTaskQuota(path.dirname(task.storagePath), config);
-        db.insertTask(task);
+    return db.withTransaction(() => {
+        try {
+            generateTaskFiles(task, { ...input, attachments }, config, cacheDir);
+            enforceTaskQuota(path.dirname(task.storagePath), config);
+            db.insertTask(task);
+            return task;
+        } catch (error) {
+            fs.rmSync(paths.taskRoot, { recursive: true, force: true });
+            throw error;
+        }
     });
-
-    return task;
 }

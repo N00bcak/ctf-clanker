@@ -23,6 +23,19 @@ export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access
 export type CodexApprovalPolicy = "untrusted" | "on-request" | "never";
 export type WorkStatus = "not-started" | "running" | "needs-attention" | "done" | "failed";
 
+export interface WorkspaceSync {
+    owner: "host" | "remote";
+    state: "idle" | "uploading" | "syncing" | "error";
+    generation?: string;
+    lastSyncedAt?: string;
+    error?: string;
+}
+
+export interface WorkspaceCollection {
+    generation?: string;
+    lastSyncedAt: string;
+}
+
 export interface CodexSettings {
     model?: string;
     profile?: string;
@@ -129,6 +142,8 @@ export interface CodexTask {
     name: string;
     backend: Backend;
     status: TaskStatus;
+    executionError?: string;
+    queueOrder?: number;
     workStatus: WorkStatus;
     createdAt: string;
     startedAt?: string;
@@ -152,6 +167,7 @@ export interface CodexTask {
     networkMode: NetworkMode;
     networkEnforcement: NetworkEnforcement;
     codexSettings?: CodexSettings;
+    workspaceSync?: WorkspaceSync;
 }
 
 export interface ProvisioningPlan {
@@ -178,6 +194,8 @@ export interface RunnerHandle {
     dropletId?: string;
     sshHost?: string;
     providerPayload?: Record<string, unknown>;
+    bootstrapComplete?: boolean;
+    permissionsFingerprint?: string;
     createdAt: string;
 }
 

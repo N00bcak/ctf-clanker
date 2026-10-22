@@ -3,7 +3,7 @@ import path from "node:path";
 import { REPO_ROOT } from "../config.js";
 import { prepareTaskCodexAuth } from "../codex/auth.js";
 import type { CodexTask, ProvisioningIntent, ProvisioningPlan, RunnerHandle, TaskEvent, WebuiConfig } from "../types.js";
-import { readPermissions } from "../tasks/permissions.js";
+import { assertTaskPermissions, permissionsFingerprint, readPermissions } from "../tasks/permissions.js";
 import type { RunnerProvider, ShellTerminal } from "./Provider.js";
 import { detectDockerRuntime, docker, dockerSpawn } from "./docker.js";
 
@@ -30,12 +30,14 @@ export class LocalDockerProvider implements RunnerProvider {
     }
 
     async provision(task: CodexTask, intent: ProvisioningIntent): Promise<RunnerHandle> {
+        const permissions = readPermissions(path.join(path.dirname(task.storagePath), "permissions.yaml"), this.config);
+        assertTaskPermissions(task, permissions, this.config);
+        const fingerprint = permissionsFingerprint(permissions);
         const runtime = await detectDockerRuntime();
         if (!runtime.ok) {
             throw new Error(runtime.detail);
         }
         prepareTaskCodexAuth(task, this.config);
-        const permissions = readPermissions(path.join(path.dirname(task.storagePath), "permissions.yaml"), this.config);
         const containerName = `mecha-task-${task.id}`;
         const args = [
             "run",
@@ -48,6 +50,8 @@ export class LocalDockerProvider implements RunnerProvider {
             `task_id=${task.id}`,
             "--label",
             `intent_id=${intent.id}`,
+            "--label",
+            `permissions_fingerprint=${fingerprint}`,
             "--cpus",
             String(this.config.local.defaultCpu),
             "--memory",
@@ -73,7 +77,8 @@ export class LocalDockerProvider implements RunnerProvider {
             `${path.join(REPO_ROOT, "families", "ctf")}:/etc/codex/skills:ro`
         );
         for (const mount of permissions.mounts) {
-            args.push("-v", `${mount.source}:${mount.target}:${mount.mode.includes("w") ? "rw" : "ro"}`);
+            const source = path.resolve(mount.source.replace(/^~(?=$|\/)/, process.env.HOME ?? ""));
+            args.push("-v", `${source}:${mount.target}:${mount.mode.includes("w") ? "rw" : "ro"}`);
         }
         args.push(this.config.local.runnerImage);
         await docker(args);
@@ -82,8 +87,26 @@ export class LocalDockerProvider implements RunnerProvider {
             taskId: task.id,
             intentId: intent.id,
             containerName,
+            permissionsFingerprint: fingerprint,
             createdAt: new Date().toISOString()
         };
+    }
+
+    async recover(task: CodexTask, intent: ProvisioningIntent): Promise<RunnerHandle | undefined> {
+        try {
+            const result = await docker(["inspect", intent.expectedResourceName]);
+            const [container] = JSON.parse(result.stdout);
+            if (container.Config?.Labels?.task_id !== task.id || container.Config?.Labels?.intent_id !== intent.id) {
+                throw new Error("Refusing to recover a container with mismatched task labels");
+            }
+            const fingerprint = container.Config?.Labels?.permissions_fingerprint;
+            return { provider: "local", taskId: task.id, intentId: intent.id,
+                containerName: intent.expectedResourceName, createdAt: intent.createdAt,
+                permissionsFingerprint: typeof fingerprint === "string" && /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : undefined };
+        } catch (error) {
+            if (isMissingContainerError(error)) return undefined;
+            throw error;
+        }
     }
 
     async start(_task: CodexTask, handle: RunnerHandle): Promise<void> {
@@ -141,7 +164,11 @@ export class LocalDockerProvider implements RunnerProvider {
 
     async stop(_task: CodexTask, handle: RunnerHandle): Promise<void> {
         if (handle.containerName) {
-            await docker(["stop", handle.containerName]).catch(() => undefined);
+            try {
+                await docker(["stop", handle.containerName]);
+            } catch (error) {
+                if (!isMissingContainerError(error)) throw error;
+            }
         }
     }
 

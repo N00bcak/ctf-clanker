@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import fs from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { appendCapped } from "../utils/logs.js";
 import type { SecretRedactor } from "../utils/redactor.js";
@@ -27,12 +28,23 @@ export function hostCodexCommandArgs(task: CodexTask, config: WebuiConfig): { co
 }
 
 export class HostCodexCliBridge {
+    private active = new Map<string, ChildProcess>();
+    async stop(taskId: string): Promise<void> {
+        const child = this.active.get(taskId);
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
+        this.active.delete(taskId);
+        await new Promise<void>((resolve, reject) => {
+            child.once("close", () => resolve());
+            if (!child.kill()) reject(new Error("Unable to stop host Codex process"));
+        });
+    }
+
     constructor(
         private readonly config: WebuiConfig,
         private readonly redactor: SecretRedactor
     ) {}
 
-    async run(task: CodexTask, userPrompt: string, onOutput: (text: string) => void): Promise<void> {
+    async run(task: CodexTask, userPrompt: string, onOutput: (text: string) => void): Promise<string> {
         if (task.storagePath === "/" || task.storagePath.length < 8) {
             throw new Error("refusing to run host Codex with unsafe workspace path");
         }
@@ -44,18 +56,24 @@ export class HostCodexCliBridge {
         appendSteeringLog(task, userPrompt, this.config, this.redactor);
         const { command, args } = hostCodexCommandArgs(task, this.config);
 
+        const finalPath = path.join(task.outputPath, "last-message.txt");
+        fs.rmSync(finalPath, { force: true });
+        args.splice(args.length - 1, 0, "--output-last-message", finalPath);
         await new Promise<void>((resolve, reject) => {
             const child = spawn(command, args, {
                 cwd: task.storagePath,
                 env: process.env,
                 stdio: ["pipe", "pipe", "pipe"]
             });
+            this.active.set(task.id, child);
             child.stdout.on("data", (chunk: Buffer) => {
+                if (this.active.get(task.id) !== child) return;
                 const text = this.redactor.redact(chunk.toString());
                 appendCapped(path.join(task.logsPath, "codex.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), stream: "stdout", text })}\n`, this.config);
                 onOutput(text);
             });
             child.stderr.on("data", (chunk: Buffer) => {
+                if (this.active.get(task.id) !== child) return;
                 const text = this.redactor.redact(chunk.toString());
                 appendCapped(path.join(task.logsPath, "codex.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), stream: "stderr", text })}\n`, this.config);
                 onOutput(text);
@@ -68,11 +86,15 @@ export class HostCodexCliBridge {
                 reject(error);
             });
             child.on("close", (code) => {
-                updateBridgeContext(task, userPrompt, code ?? -1, this.redactor);
+                if (this.active.get(task.id) === child) {
+                    this.active.delete(task.id);
+                    updateBridgeContext(task, userPrompt, code ?? -1, this.redactor);
+                }
                 if (code === 0) resolve();
                 else reject(new Error(`host codex exec exited with ${code}; run 'codex login status' to check authentication`));
             });
             child.stdin.end(prompt);
         });
+        return fs.existsSync(finalPath) ? fs.readFileSync(finalPath, "utf8") : "";
     }
 }
