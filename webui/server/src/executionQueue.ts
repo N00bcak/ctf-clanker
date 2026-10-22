@@ -2,6 +2,7 @@ import fs from "node:fs";
 import type { WebuiDatabase } from "./db.js";
 import type { Scheduler } from "./scheduler.js";
 import type { CodexTask, WebuiConfig, WorkStatus } from "./types.js";
+import { LocalResources } from "./localResources.js";
 
 type Execution = { id: number; task_id: string; prompt: string; state: string };
 type Job = { cancelled: boolean; destroying?: boolean; provisioning?: Promise<CodexTask>; finishing?: Promise<void> };
@@ -21,9 +22,20 @@ export class ExecutionQueue {
     private scheduled = false;
     private closed = false;
     private recovering = true;
+    private rerun = false;
+    private timer?: ReturnType<typeof setInterval>;
+    private local: LocalResources;
+    private dispatching?: Promise<void>;
 
     constructor(private db: WebuiDatabase, private scheduler: Scheduler, private config: WebuiConfig,
-        private run: (task: CodexTask, prompt: string, isCurrent: () => boolean) => Promise<string | void>) {}
+        private run: (task: CodexTask, prompt: string, isCurrent: () => boolean) => Promise<string | void>) {
+        this.local = new LocalResources(db, config, scheduler.localProvider(), task => scheduler.getHandle(task));
+    }
+
+    status() {
+        const status = this.local.status();
+        return this.recovering ? { ...status, state: "recovering" as const, reason: "Recovering interrupted executions before admission" } : status;
+    }
 
     private open(taskId: string): Execution | undefined {
         return this.db.db.prepare("SELECT * FROM executions WHERE task_id = ? AND state != 'terminal'").get(taskId) as Execution | undefined;
@@ -51,27 +63,70 @@ export class ExecutionQueue {
     }
 
     private wake(): void {
-        if (this.closed || this.recovering || this.scheduled) return;
+        if (this.closed || this.recovering) return;
+        this.dispatchOtherBackends();
+        if (this.scheduled) { this.rerun = true; return; }
         this.scheduled = true;
         setImmediate(() => {
-            this.scheduled = false;
-            if (this.closed) return;
-            for (const execution of this.db.db.prepare("SELECT * FROM executions WHERE state = 'pending' ORDER BY id").all() as Execution[]) {
-                const task = this.db.getTask(execution.task_id);
-                if (!task || task.status === "destroying" || this.jobs.has(execution.id)) continue;
-                const admitted = this.db.withTransaction(() => {
-                    const active = this.db.db.prepare(`SELECT COUNT(*) AS n FROM executions e JOIN tasks t ON t.id=e.task_id
-                        WHERE e.state='active' AND t.backend=? AND t.codex_runtime!='host'`).get(task.backend) as { n: number };
-                    const limit = task.backend === "local" ? this.config.local.concurrency : this.config.cloud.maxConcurrent;
-                    if (task.codexRuntime !== "host" && active.n >= limit) return false;
-                    return this.db.db.prepare("UPDATE executions SET state='active' WHERE id=? AND state='pending'").run(execution.id).changes === 1;
-                });
-                if (!admitted) continue;
-                const job: Job = { cancelled: false };
-                this.jobs.set(execution.id, job);
-                void this.execute(execution, job).catch(() => { /* Cleanup errors are persisted on the task. */ });
-            }
+            this.dispatching = this.dispatch().catch(error => {
+                for (const [id, job] of this.jobs) {
+                    const execution = this.db.db.prepare("SELECT state FROM executions WHERE id=?").get(id) as { state: string } | undefined;
+                    if (execution?.state === "pending" && !job.cancelled) this.jobs.delete(id);
+                }
+                const task = this.db.listTasks().find(task => task.status === "queued");
+                if (task) this.scheduler.emit(task, "scheduler.failed", { error: String(error) });
+            }).finally(() => {
+                this.scheduled = false;
+                this.dispatching = undefined;
+                if (this.rerun) { this.rerun = false; this.wake(); }
+            });
         });
+    }
+
+    private dispatchOtherBackends(): void {
+        // Keep these synchronous admissions independent of in-flight Docker telemetry/updates.
+        const pending = this.db.db.prepare(`SELECT e.* FROM executions e JOIN tasks t ON t.id=e.task_id
+            WHERE e.state='pending' AND (t.backend!='local' OR t.codex_runtime='host') ORDER BY e.id`).all() as Execution[];
+        for (const execution of pending) {
+            const task = this.db.getTask(execution.task_id);
+            if (!task || task.status === "destroying" || this.jobs.has(execution.id)) continue;
+            const admitted = this.db.withTransaction(() => {
+                const active = this.db.db.prepare(`SELECT COUNT(*) AS n FROM executions e JOIN tasks t ON t.id=e.task_id
+                    WHERE e.state='active' AND t.backend=? AND t.codex_runtime!='host'`).get(task.backend) as { n: number };
+                if (task.codexRuntime !== "host" && active.n >= this.config.cloud.maxConcurrent) return false;
+                return this.db.db.prepare("UPDATE executions SET state='active' WHERE id=? AND state='pending'").run(execution.id).changes === 1;
+            });
+            if (!admitted) continue;
+            const job: Job = { cancelled: false };
+            this.jobs.set(execution.id, job);
+            void this.execute(execution, job).catch(() => { /* Cleanup errors are persisted on the task. */ });
+        }
+    }
+
+    private async dispatch(): Promise<void> {
+        if (this.closed) return;
+        await this.local.refresh();
+        const executions = this.db.db.prepare(`SELECT e.* FROM executions e JOIN tasks t ON t.id=e.task_id
+            WHERE e.state='pending' AND t.backend='local' AND t.codex_runtime!='host' ORDER BY e.id`).all() as Execution[];
+        for (const execution of executions) {
+            if (this.closed) return;
+            const task = this.db.getTask(execution.task_id);
+            if (!task || task.status === "destroying" || this.jobs.has(execution.id)) continue;
+            // Stop/Destroy must see this same job while admission awaits Docker updates.
+            const job: Job = { cancelled: false };
+            this.jobs.set(execution.id, job);
+            const admitted = await this.local.admit(execution.id, task);
+            if (!admitted) {
+                if (!job.cancelled) this.jobs.delete(execution.id);
+                break;
+            }
+            if (job.cancelled || this.closed) {
+                job.cancelled = true;
+                if (!job.destroying) await this.finish(execution, job, "needs-attention");
+                continue;
+            }
+            void this.execute(execution, job).catch(() => { /* Cleanup errors are persisted on the task. */ });
+        }
     }
 
     private async execute(execution: Execution, job: Job): Promise<void> {
@@ -206,11 +261,15 @@ export class ExecutionQueue {
             catch (error) { this.scheduler.emit(task, "permissions.invalid", { error: String(error) }); }
         }
         this.recovering = false;
+        this.timer = setInterval(() => this.wake(), 5_000);
+        this.timer.unref();
         this.wake();
     }
 
     async close(): Promise<void> {
         this.closed = true;
+        clearInterval(this.timer);
+        await this.dispatching;
         for (const execution of this.db.db.prepare("SELECT * FROM executions WHERE state='active'").all() as Execution[]) {
             await this.stop(execution.task_id).catch(() => undefined);
         }

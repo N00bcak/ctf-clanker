@@ -1,19 +1,30 @@
 import fs from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { buildServer } from "../server/src/main";
-import { testConfig } from "./helpers";
+import { WebuiDatabase } from "../server/src/db";
+import { LocalResources } from "../server/src/localResources";
+import { fakeResourceControls, testConfig } from "./helpers";
 import type { FastifyInstance } from "fastify";
 import type { CodexTask, ProvisioningIntent } from "../server/src/types";
 import type { RunnerProvider } from "../server/src/providers/Provider";
 
 const servers: FastifyInstance[] = [];
-afterEach(async () => { for (const app of servers.splice(0)) await app.close(); });
+afterEach(async () => { vi.useRealTimers(); for (const app of servers.splice(0)) await app.close(); vi.restoreAllMocks(); });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
+async function until(assertion: () => void) {
+    for (let index = 0; index < 100; index++) {
+        try { assertion(); return; }
+        catch { await new Promise<void>(resolve => setImmediate(resolve)); }
+    }
+    assertion();
+}
 async function fixture(concurrency = 1) {
     const config = testConfig();
     config.local.concurrency = concurrency;
+    const db = new WebuiDatabase(config);
     const turns: Array<{ id: string; prompt: string; done: ReturnType<typeof deferred<string>> }> = [];
     const provider = {
+        ...fakeResourceControls(config),
         describeProvisioning: (t: CodexTask) => ({ backend: "local", expectedResourceName: t.id, labels: {} }),
         provision: vi.fn(async (t: CodexTask, i: ProvisioningIntent) => ({ provider: "local", taskId: t.id, intentId: i.id, containerName: t.id, createdAt: new Date().toISOString() })),
         start: vi.fn(async () => {}), stop: vi.fn(async () => {}), destroy: vi.fn(async () => {})
@@ -22,14 +33,36 @@ async function fixture(concurrency = 1) {
         run: vi.fn(async (t: CodexTask, _h: unknown, prompt: string) => { const done = deferred<string>(); turns.push({ id: t.id, prompt, done }); return done.promise; }),
         stop: vi.fn(), state: () => ({ state: "closed" as const })
     };
-    const { app } = await buildServer({ config, providers: new Map([["local", provider]]), nativeCodex,
-        hostCodex: { run: (task, prompt) => nativeCodex.run(task, undefined, prompt), stop: vi.fn() }
-    });
+    const hostCodex = { run: (task: CodexTask, prompt: string) => nativeCodex.run(task, undefined, prompt), stop: vi.fn(async (_taskId: string) => {}) };
+    const { app } = await buildServer({ config, db, providers: new Map([["local", provider]]), nativeCodex, hostCodex });
     servers.push(app);
     const call = async (method: "POST" | "GET" | "PATCH", url: string, payload?: Record<string, unknown>) => app.inject({ method, url, payload });
     const create = async (prompt: string) => (await call("POST", "/api/tasks", { prompt })).json();
     const get = async (id: string) => (await call("GET", `/api/tasks/${id}`)).json();
-    return { app, config, provider, nativeCodex, turns, call, create, get };
+    return { app, db, config, provider, nativeCodex, hostCodex, turns, call, create, get };
+}
+
+async function admissionRaceFixture() {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const f = await fixture(2);
+    const a = await f.create("active during admission"), b = await f.create("cancelled during admission");
+    await f.call("POST", `/api/tasks/${a.id}/start`);
+    await until(() => expect(f.turns).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(35_000);
+    const gate = deferred<void>();
+    let awaitingAdmission = false;
+    const admit = LocalResources.prototype.admit;
+    vi.spyOn(LocalResources.prototype, "admit").mockImplementation(async function (this: LocalResources, executionId, task) {
+        const admitted = await admit.call(this, executionId, task);
+        if (admitted && task.id === b.id) {
+            awaitingAdmission = true;
+            await gate.promise;
+        }
+        return admitted;
+    });
+    await f.call("POST", `/api/tasks/${b.id}/start`);
+    await until(() => expect(awaitingAdmission).toBe(true));
+    return { ...f, a, b, gate };
 }
 it("accepts once, dispatches FIFO, and yields after unresolved and solved turns", async () => {
     const f = await fixture(); const a = await f.create("first"); const b = await f.create("second");
@@ -103,6 +136,40 @@ it("waits for provisioning before cancellation and ignores late completion after
     expect((await f.call("GET", `/api/tasks/${b.id}`)).statusCode).toBe(400);
     expect(fs.existsSync(`${f.config.paths.cacheDir}/${b.id}`)).toBe(false);
 });
+it("keeps cancellation and its reservation while asynchronous admission finishes", async () => {
+    const f = await admissionRaceFixture();
+    const cleanup = deferred<void>();
+    f.hostCodex.stop.mockImplementation(async taskId => { if (taskId === f.b.id) await cleanup.promise; });
+    try {
+        const stopping = f.call("POST", `/api/tasks/${f.b.id}/stop`);
+        for (let index = 0; index < 8; index++) await new Promise<void>(resolve => setImmediate(resolve));
+        f.gate.resolve();
+        await until(() => expect(f.hostCodex.stop).toHaveBeenCalledWith(f.b.id));
+        for (let index = 0; index < 8; index++) await new Promise<void>(resolve => setImmediate(resolve));
+        expect(f.turns.map(turn => turn.id)).toEqual([f.a.id]);
+        expect(f.provider.provision).toHaveBeenCalledTimes(1);
+        expect(f.db.hasOpenExecution(f.b.id)).toBe(true);
+        expect(f.db.getTask(f.b.id)?.resources?.memoryMb).toBe(1024);
+        cleanup.resolve();
+        expect((await stopping).statusCode).toBe(200);
+        expect(f.db.hasOpenExecution(f.b.id)).toBe(false);
+        expect(f.db.getTask(f.b.id)?.resources).toBeUndefined();
+        expect(f.turns.map(turn => turn.id)).toEqual([f.a.id]);
+    } finally { f.gate.resolve(); cleanup.resolve(); }
+});
+it("does not start an admitted prompt after shutdown begins during asynchronous admission", async () => {
+    const f = await admissionRaceFixture();
+    try {
+        const closing = f.app.close();
+        for (let index = 0; index < 8; index++) await new Promise<void>(resolve => setImmediate(resolve));
+        f.gate.resolve();
+        await closing;
+        expect(f.turns.map(turn => turn.id)).toEqual([f.a.id]);
+        expect(f.provider.provision).toHaveBeenCalledTimes(1);
+        expect(f.db.hasOpenExecution(f.a.id)).toBe(false);
+        expect(f.db.hasOpenExecution(f.b.id)).toBe(false);
+    } finally { f.gate.resolve(); }
+});
 it("recovers persisted and legacy queues without replaying an interrupted turn", async () => {
     const { WebuiDatabase } = await import("../server/src/db");
     const { createTask } = await import("../server/src/tasks/createTask");
@@ -115,6 +182,7 @@ it("recovers persisted and legacy queues without replaying an interrupted turn",
     db.updateTaskStatus(a.id, "running"); db.updateTaskStatus(b.id, "queued"); db.updateTaskStatus(c.id, "queued");
     const prompts: string[] = [];
     const provider = {
+        ...fakeResourceControls(config),
         describeProvisioning: (t: CodexTask) => ({ backend: "local", expectedResourceName: t.id, labels: {} }),
         provision: async (t: CodexTask, i: ProvisioningIntent) => ({ provider: "local", taskId: t.id, intentId: i.id, containerName: t.id, createdAt: new Date().toISOString() }),
         start: async () => {}, stop: async () => {}
@@ -134,15 +202,20 @@ it("requires an explicit, valid final result to classify success", async () => {
     expect(resultStatus('{"outcome":"solved","summary":"recovered from artifact","flag":"flag{x}"}')).toBe("done");
 });
 it("respects configured parallel capacity and advances after a solver failure", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     const f = await fixture(2);
     const a = await f.create("failure"), b = await f.create("second"), c = await f.create("third"), d = await f.create("fourth");
     f.nativeCodex.run.mockRejectedValueOnce(new Error("solver failed"));
     await Promise.all([a,b,c,d].map(task => f.call("POST", `/api/tasks/${task.id}/start`)));
-    await vi.waitFor(() => expect(f.turns).toHaveLength(2));
+    await until(() => expect(f.turns).toHaveLength(1));
     expect((await f.get(a.id)).workStatus).toBe("failed");
+    await vi.advanceTimersByTimeAsync(35_000);
+    await until(() => expect(f.turns).toHaveLength(2));
     expect((await f.get(d.id)).status).toBe("queued");
     f.turns[0].done.resolve("");
-    await vi.waitFor(() => expect(f.turns).toHaveLength(3));
+    await until(() => expect(f.provider.stop).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(35_000);
+    await until(() => expect(f.turns).toHaveLength(3));
     expect(f.turns.map(t => t.prompt)).toEqual(["second", "third", "fourth"]);
     f.turns[1].done.resolve(""); f.turns[2].done.resolve("");
 });
@@ -170,6 +243,30 @@ it("does not let host execution consume Docker capacity", async () => {
     expect((await f.get(b.id)).status).toBe("queued");
     f.turns.find(t => t.id === a.id)!.done.resolve("");
     await vi.waitFor(() => expect(f.turns).toHaveLength(3)); f.turns[2].done.resolve("");
+});
+it("dispatches host work while Docker capacity monitoring is awaiting a response", async () => {
+    const f = await fixture();
+    const gate = deferred<void>();
+    let checkingCapacity = false;
+    const capacity = f.provider.getCapacity!.bind(f.provider);
+    vi.spyOn(f.provider as Required<Pick<RunnerProvider, "getCapacity">>, "getCapacity").mockImplementation(async () => {
+        checkingCapacity = true;
+        await gate.promise;
+        return capacity();
+    });
+    try {
+        const local = await f.create("local waiting for Docker telemetry");
+        await f.call("POST", `/api/tasks/${local.id}/start`);
+        await until(() => expect(checkingCapacity).toBe(true));
+        f.config.codex.credentialMode = "host-codex-cli";
+        const host = await f.create("host runs while Docker is unavailable");
+        f.config.codex.credentialMode = "codex-auth-json";
+        await f.call("POST", `/api/tasks/${host.id}/start`);
+        await until(() => expect(f.turns.map(turn => turn.id)).toEqual([host.id]));
+        expect(f.provider.provision).not.toHaveBeenCalled();
+        expect(f.db.getTask(local.id)?.status).toBe("queued");
+        f.turns[0].done.resolve("");
+    } finally { gate.resolve(); }
 });
 it("does not relabel waiting executions as running when the database reopens", async () => {
     const { WebuiDatabase } = await import("../server/src/db");

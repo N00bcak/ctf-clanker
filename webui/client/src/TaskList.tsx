@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import type { Task } from "./api";
+import type { SchedulerStatus, Task } from "./api";
+import { formatCpu, formatMemory } from "./SchedulerStatus";
 
 type QueueFilter = "all" | "attention" | "running" | "ready" | "done";
 
@@ -13,11 +14,14 @@ const groups: Array<{ key: Exclude<QueueFilter, "all">; label: string; statuses:
 export function TaskList(props: {
     tasks: Task[];
     selectedId?: string;
+    scheduler?: SchedulerStatus;
     onSelect: (id: string) => void;
 }) {
     const [query, setQuery] = useState("");
     const [filter, setFilter] = useState<QueueFilter>("all");
     const normalizedQuery = query.trim().toLowerCase();
+    const workers = new Map(props.scheduler?.workers.map((worker) => [worker.taskId, worker]));
+    const waiting = new Map(props.scheduler?.waiting.map((entry) => [entry.taskId, entry.reason]));
     const counts = useMemo(() => Object.fromEntries(groups.map((group) => [
         group.key,
         props.tasks.filter((task) => group.statuses.includes(task.workStatus)).length
@@ -73,6 +77,8 @@ export function TaskList(props: {
                                         <span className="task-row-copy">
                                             <strong>{task.name}</strong>
                                             <span>{task.status} · {task.codexRuntime}</span>
+                                            {workers.has(task.id) && <span className="task-resources">{formatCpu(workers.get(task.id)!.cpu)} CPU · {formatMemory(workers.get(task.id)!.memoryMb)} reserved</span>}
+                                            {waiting.has(task.id) && <span className="task-waiting-reason">{waiting.get(task.id)}</span>}
                                         </span>
                                         <span className="task-backend">{task.backend === "local" ? "LOC" : "DO"}</span>
                                     </button>

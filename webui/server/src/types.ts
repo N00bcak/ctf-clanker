@@ -44,6 +44,30 @@ export interface CodexSettings {
     webSearch: boolean;
 }
 
+export interface RunnerResources {
+    cpu: number;
+    memoryMb: number;
+}
+
+export interface SchedulerStatus {
+    maxWorkers: number;
+    activeWorkers: number;
+    cpuBudget: number;
+    cpuAllocated: number;
+    cpuUsage?: number;
+    memoryBudgetMb: number;
+    effectiveMemoryMb?: number;
+    memoryReservedMb: number;
+    memoryUsageMb?: number;
+    workerMemoryMb: number;
+    effectiveMaxWorkers?: number;
+    state: "ready" | "observing" | "blocked" | "recovering";
+    reason?: string;
+    sampledAt?: string;
+    workers: Array<RunnerResources & { taskId: string; cpuUsage?: number; memoryUsageMb?: number }>;
+    waiting: Array<{ taskId: string; reason: string }>;
+}
+
 export interface WebuiConfig {
     server: {
         host: string;
@@ -94,6 +118,8 @@ export interface WebuiConfig {
         runnerImage: string;
         defaultCpu: number;
         defaultMemoryMb: number;
+        cpuBudget?: number;
+        memoryBudgetMb?: number;
         pidsLimit: number;
     };
     cloud: {
@@ -177,6 +203,7 @@ export interface CodexTask {
     networkEnforcement: NetworkEnforcement;
     codexSettings?: CodexSettings;
     workspaceSync?: WorkspaceSync;
+    resources?: RunnerResources;
 }
 
 export interface ProvisioningPlan {

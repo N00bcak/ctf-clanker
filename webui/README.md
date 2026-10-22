@@ -101,8 +101,45 @@ not submit the initial prompt separately. Repeated Start requests are idempotent
 while a run is pending or active. `POST /api/tasks/:id/prompt` queues a follow-up
 with HTTP 202 and rejects overlapping requests for the same task.
 
-Local runs use FIFO admission within the configured concurrency limit. Every
-finished turn releases its runner after cleanup: a valid solved report becomes
+Local Docker runs use FIFO admission within worker, CPU, and RAM ceilings:
+
+```yaml
+local:
+  concurrency: 8
+  defaultCpu: 1
+  cpuBudget: 6
+  defaultMemoryMb: 2048
+  memoryBudgetMb: 8192
+```
+
+RAM settings use Docker's binary units (2048 MB here is 2 GiB). Each active
+execution reserves its full fixed RAM limit. The effective worker RAM budget is
+the smaller of `memoryBudgetMb` and Docker's reported total RAM minus a single
+1 GiB runtime reserve. This configuration permits four workers from the global
+budget, or fewer when Docker has less memory. The maximum of eight workers
+remains a ceiling; low observed RAM usage never permits overcommit. Unmanaged
+containers and Docker/WebUI overhead are outside the managed-worker budget.
+
+The server samples Docker every five seconds and allocates CPU from the last
+30 seconds of peak usage plus 25% headroom. Each worker retains a minimum of
+`min(0.25, cpuBudget / concurrency)` CPU. Combined CPU limits stay within the
+configured budget and Docker's CPU capacity. The first fitting task starts
+immediately; additional concurrent workers require 30 seconds of sustained CPU
+usage below 70% of capacity with existing worker demand satisfied. Admissions
+ramp by at most one worker per observation window. RAM caps remain fixed and
+running workers are not preempted. A worker's initial CPU allocation is bounded
+by `defaultCpu` and available shared capacity.
+
+Omitted CPU and RAM budgets default to `concurrency * defaultCpu` and
+`concurrency * defaultMemoryMb`. Insufficient Docker capacity, stale telemetry,
+and unconfirmed limit updates pause admissions and appear in the queue's Local
+Docker panel. `GET /api/scheduler` exposes configured/effective ceilings,
+reservations, available usage readings, and per-task waiting reasons without
+starting work. Limits on retained containers are reconciled before restart;
+resource changes preserve their workspace and filesystem. Host-broker and cloud
+execution retain their existing admission behavior.
+
+Every finished turn releases its runner after cleanup: a valid solved report becomes
 `done`, an unresolved or missing report becomes `needs-attention`, and execution
 errors become `failed`. Unresolved tasks require an explicit follow-up; they do
 not block later tasks. Stop and Mark Done also release capacity. Cleanup errors

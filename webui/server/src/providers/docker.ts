@@ -6,10 +6,12 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export async function docker(args: string[], options: { env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: string; stderr: string }> {
+export async function docker(args: string[], options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string }> {
     const result = await execFileAsync("docker", args, {
         env: options.env ?? process.env,
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: options.timeoutMs ?? 30_000,
+        killSignal: "SIGKILL"
     });
     return { stdout: result.stdout, stderr: result.stderr };
 }

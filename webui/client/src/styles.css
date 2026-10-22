@@ -67,6 +67,20 @@ h1, h2, h3, p { margin-top: 0; }
 .app-error { flex: 0 0 auto; margin: 8px 12px; }
 .queue-scrim { display: none; }
 
+.scheduler-status { flex: 0 0 auto; display: grid; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); background: rgba(53, 194, 255, 0.025); font-size: 10px; }
+.scheduler-status > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }
+.scheduler-status > header > strong { color: var(--muted-strong); font-size: 11px; }
+.scheduler-state { color: var(--cyan); font: 700 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.scheduler-state-ready { color: var(--green); }
+.scheduler-state-blocked, .scheduler-state-recovering, .scheduler-state-unavailable { color: var(--amber); }
+.scheduler-status dl { display: grid; gap: 7px; margin: 0; }
+.scheduler-status dl > div { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 6px; }
+.scheduler-status dt { color: var(--muted); }
+.scheduler-status dd { display: grid; gap: 3px; margin: 0; color: var(--muted-strong); overflow-wrap: anywhere; }
+.scheduler-status dd span, .scheduler-status time { color: var(--muted); }
+.scheduler-status time { font-size: 9px; }
+.scheduler-reason { margin: 0; color: var(--amber); line-height: 1.45; overflow-wrap: anywhere; }
+
 .task-queue { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .queue-search { display: flex; align-items: center; gap: 7px; margin: 12px 12px 8px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: #0a1017; padding-left: 10px; }
 .queue-search input { border: 0; background: transparent; padding-left: 0; outline: none; }
@@ -87,6 +101,8 @@ h1, h2, h3, p { margin-top: 0; }
 .task-row-copy { display: grid; min-width: 0; gap: 4px; }
 .task-row-copy strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .task-row-copy > span { overflow: hidden; color: var(--muted); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.task-row-copy > .task-resources { color: var(--muted-strong); text-transform: none; }
+.task-row-copy > .task-waiting-reason { color: var(--amber); line-height: 1.4; text-transform: none; white-space: normal; overflow-wrap: anywhere; }
 .task-backend { color: var(--muted); font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .task-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .task-dot-running { background: var(--green); box-shadow: 0 0 7px rgba(69, 212, 131, 0.7); }
@@ -304,4 +320,8 @@ kbd { display: inline-grid; place-items: center; min-width: 17px; height: 17px; 
     .task-header { min-height: 60px; padding-top: 7px; padding-bottom: 7px; }
     .risk-panel { margin-top: 5px; margin-bottom: 5px; }
     .prompt-composer textarea { min-height: 44px; }
+}
+
+@media (max-height: 600px) {
+    .scheduler-status { max-height: 25dvh; overflow-y: auto; }
 }

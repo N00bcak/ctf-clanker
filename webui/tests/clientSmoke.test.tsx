@@ -13,7 +13,8 @@ import { FileBrowser } from "../client/src/FileBrowser";
 import { PermissionsEditor } from "../client/src/PermissionsEditor";
 import { sanitizeCodexTranscript, TerminalPane } from "../client/src/TerminalPane";
 import { App } from "../client/src/main";
-import type { PermissionsState, Task } from "../client/src/api";
+import { SchedulerStatus } from "../client/src/SchedulerStatus";
+import type { PermissionsState, SchedulerStatus as SchedulerState, Task } from "../client/src/api";
 
 const { FakeFitAddon, FakeTerminal } = vi.hoisted(() => {
     class FakeFitAddon {
@@ -103,8 +104,18 @@ function task(overrides: Partial<Task> = {}): Task {
     };
 }
 
-function mockFetch(handler: (url: string, init?: RequestInit) => unknown): void {
+function schedulerStatus(overrides: Partial<SchedulerState> = {}): SchedulerState {
+    return {
+        maxWorkers: 8, activeWorkers: 2, cpuBudget: 6, cpuAllocated: 2.5, cpuUsage: 0,
+        memoryBudgetMb: 8192, effectiveMemoryMb: 6809, memoryReservedMb: 4096, memoryUsageMb: 1024,
+        workerMemoryMb: 2048, effectiveMaxWorkers: 3, state: "ready", workers: [], waiting: [],
+        ...overrides
+    };
+}
+
+function mockFetch(handler: (url: string, init?: RequestInit) => unknown, scheduler: () => unknown = schedulerStatus): void {
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url) === "/api/scheduler") return { ok: true, json: async () => scheduler() };
         if (String(url) === "/api/codex/models") {
             return {
                 ok: true,
@@ -178,6 +189,80 @@ describe("client smoke tests", () => {
         cleanup();
         vi.useRealTimers();
         vi.unstubAllGlobals();
+    });
+
+    it("renders configured and effective scheduler capacity with measured usage", () => {
+        render(<SchedulerStatus status={schedulerStatus()} />);
+        const panel = screen.getByRole("region", { name: "Local Docker scheduler" });
+        expect(panel.textContent).toContain("2 active / 3 effective (8 max)");
+        expect(panel.textContent).toContain("0 used");
+        expect(panel.textContent).toContain("2.5 allocated / 6 budget");
+        expect(panel.textContent).toContain("1 GiB used");
+        expect(panel.textContent).toContain("4 GiB reserved / 6.65 GiB effective");
+        expect(panel.textContent).toContain("8 GiB budget · 2 GiB per worker");
+    });
+
+    it("distinguishes unavailable scheduler telemetry from zero usage and shows blocking reasons", () => {
+        render(<SchedulerStatus status={schedulerStatus({
+            state: "recovering", cpuUsage: undefined, memoryUsageMb: undefined,
+            reason: "Docker telemetry is stale; new admissions are suspended."
+        })} />);
+        expect(screen.getAllByText("Usage unavailable")).toHaveLength(2);
+        expect(screen.getByRole("status").textContent).toContain("Docker telemetry is stale");
+        expect(screen.queryByText("0 used")).toBeNull();
+    });
+
+    it("shows local worker allocations and per-task waiting reasons in the queue", () => {
+        const running = task({ id: "running", name: "Running task" });
+        const queued = task({ id: "queued", name: "Waiting task", status: "queued", workStatus: "not-started" });
+        render(<TaskList tasks={[running, queued]} onSelect={vi.fn()} scheduler={schedulerStatus({
+            workers: [{ taskId: "running", cpu: 1.5, memoryMb: 2048 }],
+            waiting: [{ taskId: "queued", reason: "Waiting for 2048 MiB RAM" }]
+        })} />);
+        expect(screen.getByRole("button", { name: /Running task/ }).textContent).toContain("1.5 CPU · 2 GiB reserved");
+        expect(screen.getByRole("button", { name: /Waiting task/ }).textContent).toContain("Waiting for 2048 MiB RAM");
+    });
+
+    it("refreshes tasks independently when the scheduler API fails and recovers on the next poll", async () => {
+        vi.useFakeTimers();
+        let schedulerCalls = 0;
+        mockFetch((url) => url === "/api/tasks" ? [task({ name: "Available operation" })] : [], () => {
+            if (++schedulerCalls === 1) throw new Error("Docker unavailable");
+            return schedulerStatus();
+        });
+        render(<App />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        expect(screen.getByRole("heading", { name: "Available operation" })).toBeTruthy();
+        expect(screen.getByRole("status").textContent).toContain("Scheduler unavailable: Docker unavailable");
+        expect(screen.queryByRole("alert")).toBeNull();
+        await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+        expect(schedulerCalls).toBe(2);
+        expect(screen.getByText("2.5 allocated / 6 budget")).toBeTruthy();
+        expect(screen.queryByText(/Scheduler unavailable:/)).toBeNull();
+    });
+
+    it("keeps polling tasks without overlapping a slow scheduler request", async () => {
+        vi.useFakeTimers();
+        let taskCalls = 0;
+        let schedulerCalls = 0;
+        let resolveScheduler: (value: SchedulerState) => void = () => undefined;
+        mockFetch((url) => {
+            if (url === "/api/tasks") { taskCalls += 1; return []; }
+            return [];
+        }, () => {
+            schedulerCalls += 1;
+            return new Promise<SchedulerState>((resolve) => { resolveScheduler = resolve; });
+        });
+        const { unmount } = render(<App />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+        expect(taskCalls).toBe(4);
+        expect(schedulerCalls).toBe(1);
+        await act(async () => resolveScheduler(schedulerStatus()));
+        expect(screen.getByText("2.5 allocated / 6 budget")).toBeTruthy();
+        unmount();
+        await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+        expect(taskCalls).toBe(4);
+        expect(schedulerCalls).toBe(1);
     });
 
     it("sets up a draft task without starting it", async () => {

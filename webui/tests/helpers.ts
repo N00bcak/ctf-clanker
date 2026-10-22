@@ -1,7 +1,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { WebuiConfig } from "../server/src/types";
+import type { CodexTask, RunnerHandle, RunnerResources, WebuiConfig } from "../server/src/types";
+
+/** Deterministic Docker controls for fixtures that exercise queue admission. */
+export function fakeResourceControls(config: WebuiConfig) {
+    const limits = new Map<string, RunnerResources>();
+    return {
+        getCapacity: async () => ({ cpuCount: 64, memoryMb: 128 * 1024 }),
+        getUsage: async (handles: RunnerHandle[]) => handles.map((handle) => {
+            const resources = limits.get(handle.taskId) ?? { cpu: config.local.defaultCpu, memoryMb: config.local.defaultMemoryMb };
+            return { taskId: handle.taskId, cpu: 0, memoryMb: 64, cpuLimit: resources.cpu, memoryLimitMb: resources.memoryMb, running: true };
+        }),
+        setResources: async (_task: CodexTask, handle: RunnerHandle, resources: RunnerResources) => { limits.set(handle.taskId, { ...resources }); }
+    };
+}
 
 export function tempDir(): string {
     return fs.mkdtempSync(path.join(os.tmpdir(), "mecha-webui-test-"));

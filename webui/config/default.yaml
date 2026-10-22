@@ -39,12 +39,14 @@ limits:
 
 local:
   enabled: true
-  concurrency: 1
+  concurrency: 8
   provider: docker
   dockerHost: auto
   runnerImage: mecha-codex-runner:base
   defaultCpu: 1
-  defaultMemoryMb: 1024
+  defaultMemoryMb: 2048
+  cpuBudget: 6
+  memoryBudgetMb: 8192
   pidsLimit: 512
 
 cloud:

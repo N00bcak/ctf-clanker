@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
-import { api, type Task } from "./api";
+import { api, type SchedulerStatus as SchedulerState, type Task } from "./api";
+import { SchedulerStatus } from "./SchedulerStatus";
 import { TaskCreateDialog } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
 import { TaskView } from "./TaskView";
@@ -23,12 +24,16 @@ export function App() {
     const [selectedId, setSelectedId] = useState<string | undefined>(() => new URLSearchParams(window.location.search).get("task") ?? undefined);
     const [createOpen, setCreateOpen] = useState(false);
     const [error, setError] = useState<string | undefined>();
+    const [scheduler, setScheduler] = useState<SchedulerState | undefined>();
+    const [schedulerError, setSchedulerError] = useState<string | undefined>();
     const [sidebarOpen, setSidebarOpen] = useState(() => window.localStorage.getItem(SIDEBAR_OPEN_KEY) !== "false");
     const mobile = useMediaQuery("(max-width: 767px)");
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
     const queueOpen = mobile ? mobileSidebarOpen : sidebarOpen;
     const sidebarRef = useRef<HTMLElement>(null);
     const refreshGeneration = useRef(0);
+    const schedulerGeneration = useRef(0);
+    const schedulerRefreshing = useRef(false);
     useOverlay(mobile && mobileSidebarOpen && !createOpen, sidebarRef, () => setMobileSidebarOpen(false));
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -48,6 +53,24 @@ export function App() {
             setError(undefined);
         } catch (err) {
             if (generation === refreshGeneration.current) setError(err instanceof Error ? err.message : String(err));
+        }
+    }
+
+    async function refreshScheduler() {
+        if (schedulerRefreshing.current) return;
+        schedulerRefreshing.current = true;
+        const generation = ++schedulerGeneration.current;
+        try {
+            const next = await api.scheduler();
+            if (generation !== schedulerGeneration.current) return;
+            setScheduler(next);
+            setSchedulerError(undefined);
+        } catch (err) {
+            if (generation !== schedulerGeneration.current) return;
+            setScheduler(undefined);
+            setSchedulerError(err instanceof Error ? err.message : String(err));
+        } finally {
+            schedulerRefreshing.current = false;
         }
     }
 
@@ -92,10 +115,12 @@ export function App() {
 
     useEffect(() => {
         void refresh();
-        const interval = setInterval(() => void refresh(), 5000);
+        void refreshScheduler();
+        const interval = setInterval(() => { void refresh(); void refreshScheduler(); }, 5000);
         return () => {
             clearInterval(interval);
             ++refreshGeneration.current;
+            ++schedulerGeneration.current;
         };
     }, []);
 
@@ -116,7 +141,8 @@ export function App() {
             </header>
             <aside ref={sidebarRef} className="sidebar" role={mobile && queueOpen ? "dialog" : undefined} aria-modal={mobile && queueOpen ? true : undefined} aria-label="Task queue drawer" tabIndex={-1}>
                 <div className="sidebar-heading"><span className="eyebrow">Task fleet</span><strong>Operations queue</strong></div>
-                <TaskList tasks={tasks} selectedId={selected?.id} onSelect={selectTask} />
+                <SchedulerStatus status={scheduler} error={schedulerError} />
+                <TaskList tasks={tasks} scheduler={scheduler} selectedId={selected?.id} onSelect={selectTask} />
             </aside>
             {mobile && queueOpen && <button className="queue-scrim" aria-label="Close task queue overlay" onClick={() => setMobileSidebarOpen(false)} />}
             <div aria-label="Resize task queue" aria-orientation="vertical" className="sidebar-resizer" role="separator" onMouseDown={startSidebarResize} />

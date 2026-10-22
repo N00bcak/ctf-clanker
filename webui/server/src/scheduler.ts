@@ -47,6 +47,10 @@ export class Scheduler {
         return this.providerFor(task);
     }
 
+    localProvider(): RunnerProvider | undefined {
+        return this.providers.get("local");
+    }
+
     reconcilePermissions(taskId: string): CodexTask {
         const task = this.db.getTask(taskId);
         if (!task) throw new Error("task not found");
@@ -229,10 +233,10 @@ export class Scheduler {
         if (original.bridgeMode === "host-codex-broker" || original.codexRuntime === "host") {
             return this.markHostReady(taskId);
         }
-        if (original.backend === "local" && this.db.countActiveLocalTasks(taskId) >= this.config.local.concurrency) {
+        if (original.backend === "local" && !original.resources) {
             this.db.updateTaskStatus(taskId, "queued");
             const queued = this.db.getTask(taskId)!;
-            this.emit(queued, "task.queued", { concurrency: this.config.local.concurrency });
+            this.emit(queued, "task.queued", { reason: "Waiting for a local resource reservation" });
             return queued;
         }
 

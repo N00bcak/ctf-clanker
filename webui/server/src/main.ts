@@ -4,7 +4,7 @@ import fastify from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { loadConfig, WEBUI_ROOT } from "./config.js";
+import { loadConfig, validateLocalResources, WEBUI_ROOT } from "./config.js";
 import { WebuiDatabase } from "./db.js";
 import { readTaskInput } from "./tasks/readTaskInput.js";
 import { createTask, normalizeTaskSource } from "./tasks/createTask.js";
@@ -72,6 +72,7 @@ async function rawBodyToBuffer(raw: AsyncIterable<Buffer | string>): Promise<Buf
 
 export async function buildServer(options: BuildServerOptions = {}) {
     const config = options.config ?? loadConfig();
+    validateLocalResources(config);
     const redactor = options.redactor ?? new SecretRedactor(process.env, [
         "DIGITALOCEAN_TOKEN",
         "DO_API_TOKEN",
@@ -148,6 +149,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
     });
 
     app.get("/api/tasks", async () => db.listTasks());
+
+    app.get("/api/scheduler", async () => queue.status());
 
     app.get("/api/codex/models", async () => codexModels.listModels());
 

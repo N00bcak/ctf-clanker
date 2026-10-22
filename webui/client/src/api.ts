@@ -79,6 +79,25 @@ export interface CodexModelCatalog {
     queriedAt: string;
 }
 
+export interface SchedulerStatus {
+    maxWorkers: number;
+    activeWorkers: number;
+    cpuBudget: number;
+    cpuAllocated: number;
+    cpuUsage?: number;
+    memoryBudgetMb: number;
+    effectiveMemoryMb?: number;
+    memoryReservedMb: number;
+    memoryUsageMb?: number;
+    workerMemoryMb: number;
+    effectiveMaxWorkers?: number;
+    state: "ready" | "observing" | "blocked" | "recovering";
+    reason?: string;
+    sampledAt?: string;
+    workers: Array<{ taskId: string; cpu: number; memoryMb: number; cpuUsage?: number; memoryUsageMb?: number }>;
+    waiting: Array<{ taskId: string; reason: string }>;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
         ...init,
@@ -96,6 +115,7 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
     tasks: () => json<Task[]>("/api/tasks"),
+    scheduler: () => json<SchedulerStatus>("/api/scheduler"),
     codexModels: () => json<CodexModelCatalog>("/api/codex/models"),
     createTask: (input: CreateTaskRequest) =>
         json<Task>("/api/tasks", {

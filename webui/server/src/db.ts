@@ -61,7 +61,9 @@ function taskFromRow(row: Row): CodexTask {
         networkMode: row.network_mode as CodexTask["networkMode"],
         networkEnforcement: row.network_enforcement as CodexTask["networkEnforcement"],
         codexSettings: providerSpec.codexSettings as CodexTask["codexSettings"],
-        workspaceSync: parseJsonObject(row.provider_state)?.workspaceSync as CodexTask["workspaceSync"]
+        workspaceSync: parseJsonObject(row.provider_state)?.workspaceSync as CodexTask["workspaceSync"],
+        resources: row.resource_cpu == null || row.resource_memory_mb == null ? undefined
+            : { cpu: Number(row.resource_cpu), memoryMb: Number(row.resource_memory_mb) }
     };
 }
 
@@ -154,6 +156,10 @@ export class WebuiDatabase {
             );
         `);
         const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+        const executionColumns = this.db.prepare("PRAGMA table_info(executions)").all() as Array<{ name: string }>;
+        for (const [name, type] of [["cpu", "REAL"], ["memory_mb", "REAL"], ["resource_error", "TEXT"]]) {
+            if (!executionColumns.some(column => column.name === name)) this.db.exec(`ALTER TABLE executions ADD COLUMN ${name} ${type}`);
+        }
         if (!taskColumns.some((column) => column.name === "work_status")) {
             this.db.exec("ALTER TABLE tasks ADD COLUMN work_status TEXT NOT NULL DEFAULT 'not-started'");
         }
@@ -221,11 +227,19 @@ export class WebuiDatabase {
     }
 
     listTasks(): CodexTask[] {
-        return this.db.prepare("SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error, (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order FROM tasks ORDER BY created_at DESC").all().map((row) => taskFromRow(row as Row));
+        return this.db.prepare(`SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error,
+            (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order,
+            (SELECT cpu FROM executions WHERE task_id=tasks.id AND state='active') AS resource_cpu,
+            (SELECT memory_mb FROM executions WHERE task_id=tasks.id AND state='active') AS resource_memory_mb
+            FROM tasks ORDER BY created_at DESC`).all().map((row) => taskFromRow(row as Row));
     }
 
     getTask(id: string): CodexTask | undefined {
-        const row = this.db.prepare("SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error, (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order FROM tasks WHERE id = ?").get(id) as Row | undefined;
+        const row = this.db.prepare(`SELECT *, (SELECT error FROM executions WHERE task_id=tasks.id ORDER BY id DESC LIMIT 1) AS execution_error,
+            (SELECT id FROM executions WHERE task_id=tasks.id AND state='pending') AS queue_order,
+            (SELECT cpu FROM executions WHERE task_id=tasks.id AND state='active') AS resource_cpu,
+            (SELECT memory_mb FROM executions WHERE task_id=tasks.id AND state='active') AS resource_memory_mb
+            FROM tasks WHERE id = ?`).get(id) as Row | undefined;
         return row ? taskFromRow(row) : undefined;
     }
 
@@ -286,13 +300,6 @@ export class WebuiDatabase {
 
     setActiveIntent(taskId: string, intentId: string | null): void {
         this.db.prepare("UPDATE tasks SET active_provisioning_intent_id = ? WHERE id = ?").run(intentId, taskId);
-    }
-
-    countActiveLocalTasks(excludeTaskId?: string): number {
-        const row = excludeTaskId
-            ? this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND codex_runtime != 'host' AND status IN ('provisioning', 'running') AND id != ?").get(excludeTaskId) as Row
-            : this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE backend = 'local' AND codex_runtime != 'host' AND status IN ('provisioning', 'running')").get() as Row;
-        return Number(row.count);
     }
 
     createIntent(task: CodexTask, plan: ProvisioningPlan, graceSeconds: number): ProvisioningIntent {

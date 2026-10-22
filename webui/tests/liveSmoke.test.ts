@@ -37,6 +37,8 @@ describe.skipIf(!runDockerSmoke)("live Docker smoke", () => {
         fs.mkdirSync(path.join(task.codexHomePath, "sessions"));
         fs.writeFileSync(path.join(task.codexHomePath, "sessions", "fixture.jsonl"), "session survives");
         try {
+            db.db.prepare("INSERT INTO executions(task_id,prompt,state,cpu,memory_mb) VALUES (?,?,'active',?,?)")
+                .run(task.id, "credential-free network smoke", config.local.defaultCpu, config.local.defaultMemoryMb);
             await scheduler.startTask(task.id);
             const before = JSON.parse((await docker(["inspect", name])).stdout)[0];
             expect(before.HostConfig.NetworkMode).not.toBe("none");

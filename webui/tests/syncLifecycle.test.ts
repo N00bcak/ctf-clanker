@@ -11,7 +11,7 @@ import { workspaceSnapshotPath } from "../server/src/providers/workspaceTransfer
 import { createTask as createTaskRecord } from "../server/src/tasks/createTask";
 import { permissionsFingerprint, readPermissions } from "../server/src/tasks/permissions";
 import type { Backend, CodexTask, RunnerHandle, WebuiConfig, WorkspaceCollection } from "../server/src/types";
-import { testConfig } from "./helpers";
+import { fakeResourceControls, testConfig } from "./helpers";
 
 function deferred<T>() {
     let resolve!: (value: T) => void;
@@ -37,6 +37,7 @@ async function fixture(options: { initialize?: (db: WebuiDatabase, config: Webui
     const operations: string[] = [];
     const uploads: Array<{ id: string; notes: string }> = [];
     const provider = {
+        ...fakeResourceControls(config),
         describeProvisioning: (task: CodexTask) => ({ backend: task.backend, expectedResourceName: `fake-${task.id}`, labels: {} }),
         provision: vi.fn<RunnerProvider["provision"]>(async (task, intent) => ({
             provider: task.backend,
@@ -104,6 +105,34 @@ async function until(assertion: () => void) {
 const offline = { version: 1, network: { mode: "none", enforcement: "docker-none", allow: [] }, mounts: [] };
 
 describe("UI/API synchronization lifecycle", () => {
+    it("releases local reservations on shutdown while preserving pending work", async () => {
+        const f = await fixture();
+        const active = await f.create("local", "active during shutdown");
+        const pending = await f.create("local", "pending after shutdown");
+        await f.start(active.id); await f.start(pending.id);
+        await until(() => expect(f.turns).toHaveLength(1));
+        expect(f.db.getTask(active.id)?.resources).toMatchObject({ memoryMb: 1024 });
+        await f.app.close();
+        expect(f.provider.stop).toHaveBeenCalledTimes(1);
+        expect(f.db.hasOpenExecution(active.id)).toBe(false);
+        expect(f.db.getTask(active.id)?.resources).toBeUndefined();
+        expect(f.db.getTask(pending.id)?.status).toBe("queued");
+        expect(f.db.hasOpenExecution(pending.id)).toBe(true);
+        expect(f.turns.map(turn => turn.prompt)).toEqual(["active during shutdown"]);
+    });
+
+    it("persists local reservations when shutdown cleanup fails", async () => {
+        const f = await fixture();
+        const task = await f.create("local", "cleanup must stay reserved");
+        await f.start(task.id); await until(() => expect(f.turns).toHaveLength(1));
+        const reservation = f.db.getTask(task.id)?.resources;
+        f.provider.stop.mockRejectedValueOnce(new Error("Docker stop uncertain during shutdown"));
+        await f.app.close();
+        expect(f.db.hasOpenExecution(task.id)).toBe(true);
+        expect(f.db.getTask(task.id)?.resources).toEqual(reservation);
+        expect(f.db.getTask(task.id)?.executionError).toContain("Retry Stop");
+    });
+
     it("returns saved permission capabilities and persists updates in both manifests and the database", async () => {
         const f = await fixture();
         const local = await f.create();

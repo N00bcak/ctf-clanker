@@ -11,9 +11,16 @@ import type { RunnerProvider, ShellTerminal } from "../server/src/providers/Prov
 import type { CodexTerminalSessions } from "../server/src/codex/CodexPtySessionManager";
 import type { NativeCodexRunner } from "../server/src/main";
 import type { CodexTask, ProvisioningIntent, ProvisioningPlan, RunnerHandle, TaskEvent, WebuiConfig } from "../server/src/types";
-import { testConfig, tempDir } from "./helpers";
+import { fakeResourceControls, testConfig, tempDir } from "./helpers";
 
 class FakeProvider implements RunnerProvider {
+    getCapacity: RunnerProvider["getCapacity"];
+    getUsage: RunnerProvider["getUsage"];
+    setResources: RunnerProvider["setResources"];
+
+    constructor(config = testConfig()) {
+        Object.assign(this, fakeResourceControls(config));
+    }
     provisioned = 0;
     started = 0;
     stopped = 0;
@@ -150,7 +157,7 @@ const openApps: FastifyInstance[] = [];
 
 async function harness(config = testConfig()): Promise<Harness> {
     const db = new WebuiDatabase(config);
-    const provider = new FakeProvider();
+    const provider = new FakeProvider(config);
     const codexPty = new FakeCodexPty();
     const nativeCodex = new FakeNativeCodex();
     const hostPrompts: string[] = [];
@@ -209,6 +216,16 @@ async function createTask(app: FastifyInstance, input: Record<string, unknown> =
 }
 
 describe("server routes", () => {
+    it("reports configured and effective local scheduler capacity", async () => {
+        const config = testConfig();
+        Object.assign(config.local, { concurrency: 8, defaultMemoryMb: 2048, memoryBudgetMb: 8192, cpuBudget: 6 });
+        const h = await harness(config);
+        await h.app.ready();
+        const response = await h.app.inject({ method: "GET", url: "/api/scheduler" });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ maxWorkers: 8, activeWorkers: 0, cpuBudget: 6, memoryBudgetMb: 8192, workerMemoryMb: 2048, memoryReservedMb: 0, workers: [] });
+    });
+
     afterEach(async () => {
         for (const app of openApps.splice(0)) {
             await app.close();

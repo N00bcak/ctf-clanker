@@ -61,7 +61,21 @@ export function loadConfig(configFile = path.join(WEBUI_ROOT, "config/default.ya
     assertNumber(parsed.limits.attachments.maxTotalBytes, "limits.attachments.maxTotalBytes");
     assertNumber(parsed.limits.taskCacheDirQuotaMb, "limits.taskCacheDirQuotaMb");
     assertNumber(parsed.local.concurrency, "local.concurrency");
+    validateLocalResources(parsed);
     validateServerExposure(parsed, env);
     validateNetworkMode(parsed.network.mode, parsed.network.enforcement);
     return parsed;
+}
+
+export function validateLocalResources(config: WebuiConfig): void {
+    const local = config.local;
+    local.cpuBudget ??= local.concurrency * local.defaultCpu;
+    local.memoryBudgetMb ??= local.concurrency * local.defaultMemoryMb;
+    for (const key of ["concurrency", "defaultCpu", "defaultMemoryMb", "cpuBudget", "memoryBudgetMb"] as const) {
+        const value = local[key];
+        assertNumber(value, `local.${key}`);
+        if (value <= 0) throw new Error(`local.${key} must be positive`);
+    }
+    if (!Number.isInteger(local.concurrency)) throw new Error("local.concurrency must be an integer");
+    if (!Number.isSafeInteger(local.defaultMemoryMb)) throw new Error("local.defaultMemoryMb must be an integer MB limit");
 }

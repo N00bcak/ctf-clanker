@@ -7,9 +7,16 @@ import { EventBus } from "../server/src/utils/logs";
 import { SecretRedactor } from "../server/src/utils/redactor";
 import type { CodexTask, ProvisioningIntent, ProvisioningPlan, RunnerHandle, TaskEvent } from "../server/src/types";
 import type { RunnerProvider, ShellTerminal } from "../server/src/providers/Provider";
-import { testConfig, tempDir } from "./helpers";
+import { fakeResourceControls, testConfig, tempDir } from "./helpers";
 
 class FakeProvider implements RunnerProvider {
+    getCapacity: RunnerProvider["getCapacity"];
+    getUsage: RunnerProvider["getUsage"];
+    setResources: RunnerProvider["setResources"];
+
+    constructor(config = testConfig()) {
+        Object.assign(this, fakeResourceControls(config));
+    }
     provisioned = 0;
     started = 0;
     stopped = 0;
@@ -50,8 +57,13 @@ class FailingProvider extends FakeProvider {
     }
 }
 
+function reserve(db: WebuiDatabase, task: CodexTask, config: ReturnType<typeof testConfig>) {
+    db.db.prepare("INSERT INTO executions(task_id,prompt,state,cpu,memory_mb) VALUES (?,?,'active',?,?)")
+        .run(task.id, "reserved scheduler fixture", config.local.defaultCpu, config.local.defaultMemoryMb);
+}
+
 describe("scheduler and reaper", () => {
-    it("enforces local concurrency one", async () => {
+    it("requires queue admission before provisioning a local task", async () => {
         const config = testConfig(tempDir());
         const db = new WebuiDatabase(config);
         const provider = new FakeProvider();
@@ -59,6 +71,10 @@ describe("scheduler and reaper", () => {
         const one = createTask({ prompt: "one" }, config, db);
         const two = createTask({ prompt: "two" }, config, db);
 
+        const unreserved = await scheduler.startTask(one.id);
+        expect(unreserved.status).toBe("queued");
+        expect(provider.provisioned).toBe(0);
+        reserve(db, one, config);
         await scheduler.startTask(one.id);
         const queued = await scheduler.startTask(two.id);
 
@@ -94,6 +110,7 @@ describe("scheduler and reaper", () => {
         const scheduler = new Scheduler(db, new Map([["local", provider]]), config, new EventBus(), new SecretRedactor({}, []));
         const task = createTask({ prompt: "already running" }, config, db);
 
+        reserve(db, task, config);
         await scheduler.startTask(task.id);
         const secondStart = await scheduler.startTask(task.id);
 
@@ -109,6 +126,7 @@ describe("scheduler and reaper", () => {
         const scheduler = new Scheduler(db, new Map([["local", provider]]), config, new EventBus(), new SecretRedactor({}, []));
         const task = createTask({ prompt: "restart idle" }, config, db);
 
+        reserve(db, task, config);
         await scheduler.startTask(task.id);
         await scheduler.stopTask(task.id);
         const restarted = await scheduler.startTask(task.id);
@@ -126,6 +144,7 @@ describe("scheduler and reaper", () => {
         const scheduler = new Scheduler(db, new Map([["local", provider]]), config, new EventBus(), new SecretRedactor({}, []));
         const task = createTask({ prompt: "recover attached handle" }, config, db);
 
+        reserve(db, task, config);
         await scheduler.startTask(task.id);
         const attachedIntentId = db.getTask(task.id)!.activeProvisioningIntentId!;
         const failedIntent = db.createIntent(db.getTask(task.id)!, { backend: "local", expectedResourceName: "failed", labels: {} }, 120);
@@ -166,6 +185,7 @@ describe("scheduler and reaper", () => {
         const scheduler = new Scheduler(db, new Map([["local", provider]]), config, new EventBus(), new SecretRedactor({}, []));
         const task = createTask({ prompt: "fail during provision" }, config, db);
 
+        reserve(db, task, config);
         await expect(scheduler.startTask(task.id)).rejects.toThrow(/fake provision failed/);
 
         const failed = db.getTask(task.id)!;

@@ -1,4 +1,18 @@
-import type { CodexTask, ProvisioningIntent, ProvisioningPlan, RunnerHandle, TaskEvent, WorkspaceCollection } from "../types.js";
+import type { CodexTask, ProvisioningIntent, ProvisioningPlan, RunnerHandle, RunnerResources, TaskEvent, WorkspaceCollection } from "../types.js";
+
+export interface RunnerCapacity {
+    cpuCount: number;
+    memoryMb: number;
+}
+
+export interface RunnerUsage {
+    taskId: string;
+    cpu: number;
+    memoryMb: number;
+    cpuLimit: number;
+    memoryLimitMb: number;
+    running: boolean;
+}
 
 export interface ShellTerminal {
     stream: NodeJS.ReadWriteStream;
@@ -6,6 +20,9 @@ export interface ShellTerminal {
 }
 
 export interface RunnerProvider {
+    getCapacity?(): Promise<RunnerCapacity>;
+    getUsage?(handles: RunnerHandle[]): Promise<RunnerUsage[]>;
+    setResources?(task: CodexTask, handle: RunnerHandle, resources: RunnerResources): Promise<void>;
     describeProvisioning(task: CodexTask): ProvisioningPlan;
     provision(task: CodexTask, intent: ProvisioningIntent): Promise<RunnerHandle>;
     recover?(task: CodexTask, intent: ProvisioningIntent): Promise<RunnerHandle | undefined>;
