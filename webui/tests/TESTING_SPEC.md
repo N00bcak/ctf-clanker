@@ -28,6 +28,24 @@ The default test run must still be:
 Prefer realistic local fakes, deterministic transcripts, temporary
 filesystems, and injected dependencies over live services.
 
+## Coverage Ownership And Consolidation
+
+Keep a test only when it protects a distinct regression or integration boundary.
+Before removing or merging one, identify the surviving test for each meaningful
+assertion. Shared setup and overlapping coverage do not alone make tests duplicates.
+
+- Resource-controller tests own allocation math, telemetry, and reservations.
+- Queue tests own dispatch, cancellation, completion, restart, and backend independence.
+- Route tests own HTTP contracts, validation, error translation, and bridge wiring.
+- Workspace lifecycle tests own cross-module transfer ordering and recovery.
+- Provider and bridge tests own their external command and protocol contracts.
+- UI tests own interactions, outgoing requests, rendering, and stale-response handling.
+- Opt-in smoke tests own behavior that requires the actual Docker or browser runtime.
+
+Prefer one strong scenario over repeated happy paths. Keep materially different
+failure timings and security boundaries separate. Parameterize only when input
+variants exercise different contracts or branches; do not chase a test-count target.
+
 ## Default Guardrails
 
 Normal tests must not:

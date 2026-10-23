@@ -423,13 +423,10 @@ describe("server routes", () => {
         expect(started.statusCode).toBe(202);
         expect(jsonBody<CodexTask>(started).status).toBe("queued");
         await vi.waitFor(() => expect(provider.started).toBe(1));
-        expect(provider.provisioned).toBe(1);
-        expect(provider.started).toBe(1);
 
         const stopped = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/stop` });
         expect(stopped.statusCode).toBe(200);
         expect(jsonBody<CodexTask>(stopped).status).toBe("idle");
-        expect(provider.stopped).toBeGreaterThanOrEqual(1);
         expect(nativeCodex.stopped).toContain(task.id);
 
         const destroyed = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/destroy` });

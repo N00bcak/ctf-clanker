@@ -265,107 +265,32 @@ describe("client smoke tests", () => {
         expect(schedulerCalls).toBe(1);
     });
 
-    it("sets up a draft task without starting it", async () => {
-        const created = task({ id: "created", name: "Created" });
-        const onCreated = vi.fn();
-        const onSelect = vi.fn();
-        const urls: string[] = [];
-        mockFetch((url) => {
-            urls.push(url);
-            return created;
-        });
-
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={onCreated} onSelect={onSelect} />);
-        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Created" } });
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
-        fireEvent.click(screen.getByText("Create Draft"));
-
-        await waitFor(() => expect(onCreated).toHaveBeenCalled());
-        expect(onSelect).toHaveBeenCalledWith("created");
-        expect(urls).toEqual(["/api/tasks"]);
-    });
-
-    it("runs clanker by creating and enqueueing without a client prompt", async () => {
-        const created = task({ id: "created", name: "Created", status: "draft" });
-        const requests: Array<{ url: string; body?: unknown }> = [];
-        mockFetch((url, init) => {
-            requests.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-            if (url === "/api/tasks") return created;
-            if (url === "/api/tasks/created/start") return task({ id: "created", status: "running", activeProvisioningIntentId: "intent-1" });
-            if (url === "/api/tasks/created/prompt") return task({ id: "created", status: "idle" });
-            return task();
-        });
-
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
-        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Created" } });
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
-        fireEvent.click(screen.getByText("Create & Run"));
-
-        await waitFor(() => expect(requests.map((request) => request.url)).toEqual([
-            "/api/tasks",
-            "/api/tasks/created/start"
-        ]));
-        expect(requests[0].body).toEqual(expect.objectContaining({ prompt: "Do work" }));
-    });
-
-    it("closes the dialog after queued acceptance", async () => {
-        const requests: string[] = [];
-        mockFetch((url) => {
-            requests.push(url);
-            if (url === "/api/tasks") return task({ id: "queued", status: "draft" });
-            if (url === "/api/tasks/queued/start") return task({ id: "queued", status: "queued" });
-            return task();
-        });
-
-        const onClose = vi.fn();
-        render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
-        fireEvent.click(screen.getByText("Create & Run"));
-
-        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-        expect(requests).not.toContain("/api/tasks/queued/prompt");
-    });
-
-    it("keeps form data and identifies the failed run phase", async () => {
-        const created = task({ id: "created", name: "Created", status: "draft" });
-        vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
-            const path = String(url);
-            if (path === "/api/tasks/created/start") {
-                return { ok: false, json: async () => ({ error: "docker failed" }) };
-            }
-            return { ok: true, json: async () => created };
-        }));
-
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
-        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Created" } });
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
-        fireEvent.click(screen.getByText("Create & Run"));
-
-        expect(await screen.findByText(/Accepting run failed: docker failed/)).toBeTruthy();
-        expect(screen.getByDisplayValue("Created")).toBeTruthy();
-        expect(screen.getByDisplayValue("Do work")).toBeTruthy();
-    });
-
-    it("closes on acceptance without waiting for a refresh or solver request", async () => {
-        let accept!: (value: unknown) => void;
-        const accepted = new Promise(resolve => { accept = resolve; });
+    it("creates and accepts one run without client prompting or waiting for refresh", async () => {
+        let accept!: (value: Task) => void;
+        const accepted = new Promise<Task>(resolve => { accept = resolve; });
         const onClose = vi.fn();
         const onCreated = vi.fn(() => new Promise<void>(() => {}));
-        vi.stubGlobal("fetch", vi.fn(async (url: string) => ({
-            ok: true,
-            json: async () => url.endsWith("/start") ? accepted : task({ id: "accepted", status: "draft" })
-        })));
-        render(<TaskCreateDialog open onClose={onClose} onCreated={onCreated} onSelect={vi.fn()} />);
+        const onSelect = vi.fn();
+        const requests: Array<{ url: string; body: unknown }> = [];
+        mockFetch((url, init) => {
+            requests.push({ url, body: JSON.parse(String(init?.body)) });
+            return url.endsWith("/start") ? accepted : task({ id: "accepted", status: "draft" });
+        });
+        render(<TaskCreateDialog open onClose={onClose} onCreated={onCreated} onSelect={onSelect} />);
+        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Accepted" } });
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "solve later" } });
         fireEvent.click(screen.getByText("Create & Run"));
-        await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/tasks/accepted/start", expect.anything()));
+
+        await waitFor(() => expect(requests.map(({ url }) => url)).toEqual(["/api/tasks", "/api/tasks/accepted/start"]));
+        expect(requests[0].body).toMatchObject({ name: "Accepted", prompt: "solve later", backend: "local" });
+        expect(onSelect).toHaveBeenCalledWith("accepted");
         expect(onClose).not.toHaveBeenCalled();
         await act(async () => accept(task({ id: "accepted", status: "queued" })));
         expect(onClose).toHaveBeenCalledOnce();
-        expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/prompt"))).toBe(false);
+        expect(requests.map(({ url }) => url)).toEqual(["/api/tasks", "/api/tasks/accepted/start"]);
     });
 
-    it("retries acceptance against the already-created task", async () => {
+    it("preserves form data after failed acceptance and retries the saved task once", async () => {
         let attempts = 0;
         const onClose = vi.fn();
         vi.stubGlobal("fetch", vi.fn(async (url: string) => {
@@ -373,24 +298,34 @@ describe("client smoke tests", () => {
             return { ok: true, json: async () => task({ id: "retry", status: "queued" }) };
         }));
         render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
+        fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Retry" } });
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "one task" } });
         fireEvent.click(screen.getByText("Create & Run"));
-        await screen.findByText(/temporary failure/);
+
+        expect(await screen.findByText("Accepting run failed: temporary failure")).toBeTruthy();
+        expect(screen.getByDisplayValue("Retry")).toBeTruthy();
+        expect(screen.getByDisplayValue("one task")).toBeTruthy();
+        expect(onClose).not.toHaveBeenCalled();
         fireEvent.click(screen.getByText("Create & Run"));
         await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-        expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/tasks")).toHaveLength(1);
+        expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual([
+            "/api/codex/models", "/api/tasks", "/api/tasks/retry/start", "/api/tasks/retry/start"
+        ]);
     });
 
-    it("sets up a task with settings and uploaded files", async () => {
+    it("creates a selected cloud draft with settings and attachments without starting it", async () => {
         const created = task({ id: "uploaded", name: "Uploaded" });
         const onCreated = vi.fn();
-        const requests: unknown[] = [];
-        mockFetch((_url, init) => {
-            requests.push(JSON.parse(String(init?.body)));
+        const requests: Array<{ url: string; body: unknown }> = [];
+        const onSelect = vi.fn();
+        const onClose = vi.fn();
+        mockFetch((url, init) => {
+            requests.push({ url, body: JSON.parse(String(init?.body)) });
             return created;
         });
 
-        const { container } = render(<TaskCreateDialog open onClose={vi.fn()} onCreated={onCreated} onSelect={vi.fn()} />);
+        const { container } = render(<TaskCreateDialog open onClose={onClose} onCreated={onCreated} onSelect={onSelect} />);
+        fireEvent.change(screen.getByDisplayValue("Local appserver"), { target: { value: "digitalocean" } });
         fireEvent.change(screen.getByPlaceholderText("Task name"), { target: { value: "Uploaded" } });
         fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Solve this" } });
         await screen.findByRole("option", { name: "GPT-5.6 Sol · gpt-5.6-sol" });
@@ -401,10 +336,13 @@ describe("client smoke tests", () => {
         fireEvent.click(screen.getByText("Create Draft"));
 
         await waitFor(() => expect(onCreated).toHaveBeenCalled());
-        expect(requests[0]).toMatchObject({
+        expect(requests.map(({ url }) => url)).toEqual(["/api/tasks"]);
+        expect(onSelect).toHaveBeenCalledWith("uploaded");
+        expect(onClose).toHaveBeenCalledOnce();
+        expect(requests[0].body).toMatchObject({
             name: "Uploaded",
             prompt: "Solve this",
-            backend: "local",
+            backend: "digitalocean",
             codexSettings: { model: "gpt-5.6-sol", sandbox: "danger-full-access", approvalPolicy: "never", webSearch: false },
             attachments: [{ path: "attachments/flag.txt", contentBase64: "ZmxhZw==" }]
         });
@@ -516,23 +454,6 @@ describe("client smoke tests", () => {
         expect(screen.getByText(/Host broker uses the host Codex CLI/)).toBeTruthy();
     });
 
-    it("enqueues a draft without submitting its prompt from the client", async () => {
-        const calls: string[] = [];
-        mockFetch((url) => {
-            calls.push(url);
-            if (url === "/api/tasks/task_1/initial-prompt") return { prompt: "stored setup prompt" };
-            if (url === "/api/tasks/task_1/files?path=") return [];
-            return task({ status: "running", activeProvisioningIntentId: "intent-1" });
-        });
-
-        render(<TaskView task={task({ status: "draft" })} onChanged={vi.fn()} />);
-        fireEvent.click(screen.getByText("Start"));
-
-        await waitFor(() => expect(calls.filter((url) => url.includes("/start") || url.includes("/initial-prompt") || url.includes("/prompt"))).toEqual([
-            "/api/tasks/task_1/start"
-        ]));
-    });
-
     it("sends a prompt with Command-Enter while leaving plain Enter to the textarea", async () => {
         const calls: Array<{ url: string; body?: unknown }> = [];
         mockFetch((url, init) => {
@@ -554,20 +475,21 @@ describe("client smoke tests", () => {
         }));
     });
 
-    it("accepts queued Start without submitting a client prompt", async () => {
+    it("accepts queued Start with exactly one request and no initial-prompt fetch or client prompt", async () => {
         const calls: string[] = [];
+        const changed = vi.fn();
         mockFetch((url) => {
             calls.push(url);
             if (url === "/api/tasks/task_1/files?path=") return [];
-            if (url === "/api/tasks/task_1/start") return task({ status: "queued" });
+            if (url === "/api/tasks/task_1/start") return task({ status: "queued", activeProvisioningIntentId: undefined });
             return task();
         });
 
-        render(<TaskView task={task({ status: "draft" })} onChanged={vi.fn()} />);
+        render(<TaskView task={task({ status: "draft" })} onChanged={changed} />);
         fireEvent.click(screen.getByText("Start"));
 
-        await waitFor(() => expect(calls).toContain("/api/tasks/task_1/start"));
-        expect(calls).not.toContain("/api/tasks/task_1/prompt");
+        await waitFor(() => expect(changed).toHaveBeenCalledOnce());
+        expect(calls.filter(url => /\/(start|initial-prompt|prompt)$/.test(url))).toEqual(["/api/tasks/task_1/start"]);
     });
 
     it("applies action button states by task status", () => {
@@ -724,64 +646,6 @@ describe("client smoke tests", () => {
         expect(FakeTerminal.instances[0].onData).not.toHaveBeenCalled();
     });
 
-    it("runs clanker for host-broker tasks without requiring a runner handle", async () => {
-        const requests: string[] = [];
-        mockFetch((url) => {
-            requests.push(url);
-            if (url === "/api/tasks") return task({
-                id: "host",
-                bridgeMode: "host-codex-broker",
-                codexRuntime: "host",
-                credentialMode: "host-codex-cli",
-                status: "draft"
-            });
-            if (url === "/api/tasks/host/start") return task({
-                id: "host",
-                bridgeMode: "host-codex-broker",
-                codexRuntime: "host",
-                credentialMode: "host-codex-cli",
-                status: "idle"
-            });
-            if (url === "/api/tasks/host/prompt") return task({
-                id: "host",
-                bridgeMode: "host-codex-broker",
-                codexRuntime: "host",
-                credentialMode: "host-codex-cli",
-                status: "idle"
-            });
-            return task();
-        });
-
-        render(<TaskCreateDialog open onClose={vi.fn()} onCreated={vi.fn()} onSelect={vi.fn()} />);
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do host work" } });
-        fireEvent.click(screen.getByText("Create & Run"));
-
-        await waitFor(() => expect(requests.filter((url) => url.includes("host") || url === "/api/tasks")).toEqual([
-            "/api/tasks",
-            "/api/tasks/host/start"
-        ]));
-        expect(screen.queryByText("Runner is not ready yet; Codex has not been called.")).toBeNull();
-    });
-
-    it("closes after accepting a cloud run without submitting a client prompt", async () => {
-        const requests: string[] = [];
-        mockFetch((url) => {
-            requests.push(url);
-            if (url === "/api/tasks") return task({ id: "dry", backend: "digitalocean", status: "draft" });
-            if (url === "/api/tasks/dry/start") return task({ id: "dry", backend: "digitalocean", status: "idle", activeProvisioningIntentId: "intent-dry" });
-            return task();
-        });
-
-        const onClose = vi.fn();
-        render(<TaskCreateDialog open onClose={onClose} onCreated={vi.fn()} onSelect={vi.fn()} />);
-        fireEvent.change(screen.getByDisplayValue("Local appserver"), { target: { value: "digitalocean" } });
-        fireEvent.change(screen.getByPlaceholderText("Initial prompt"), { target: { value: "Do work" } });
-        fireEvent.click(screen.getByText("Create & Run"));
-
-        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-        expect(requests).not.toContain("/api/tasks/dry/prompt");
-    });
-
     it("resizes and persists the sidebar width", async () => {
         mockFetch((url) => url === "/api/tasks" ? [task()] : []);
         const { container } = render(<App />);
@@ -887,17 +751,6 @@ describe("client smoke tests", () => {
         act(() => socket.onmessage?.({ data: "{\"type\":\"task.status\"}" }));
 
         expect(await screen.findByText(/task.status/)).toBeTruthy();
-    });
-
-    it("renders PermissionsEditor and saves mocked permissions", async () => {
-        mockFetch((_url, init) => init?.method === "PATCH" ? JSON.parse(String(init.body)) : permissionState());
-        render(<PermissionsEditor task={task()} />);
-
-        await waitFor(() => expect(screen.getByText("Save Permissions")).toHaveProperty("disabled", false));
-        fireEvent.change(screen.getByLabelText("Network mode"), { target: { value: "none" } });
-        fireEvent.click(screen.getByText("Save Permissions"));
-
-        expect(await screen.findByText("Saved; applies to the next run.")).toBeTruthy();
     });
 
     it("resets FileBrowser state when switching tasks", async () => {

@@ -116,18 +116,31 @@ describe("LocalDockerProvider", () => {
         expect(fs.existsSync(path.join(task.codexHomePath, "auth.json"))).toBe(false);
     });
 
-    it("recovers the permissions fingerprint from container labels", async () => {
+    it("recovers interrupted provisioning and its permission fingerprint only for matching task and intent labels", async () => {
         const config = testConfig();
         const db = new WebuiDatabase(config);
         const task = createTask({ prompt: "recover" }, config, db);
         const provider = new LocalDockerProvider(config);
         const intent = db.createIntent(task, provider.describeProvisioning(task), 120);
+        // Older retained containers have no permissions fingerprint.
+        vi.mocked(docker).mockResolvedValueOnce({ stdout: JSON.stringify([{ Config: { Labels: {
+            task_id: task.id, intent_id: intent.id
+        } } }]), stderr: "" });
+        expect(await provider.recover(task, intent)).toMatchObject({
+            containerName: `mecha-task-${task.id}`, permissionsFingerprint: undefined
+        });
         const fingerprint = "f".repeat(64);
         vi.mocked(docker).mockResolvedValueOnce({ stdout: JSON.stringify([{ Config: { Labels: {
             task_id: task.id, intent_id: intent.id, permissions_fingerprint: fingerprint
         } } }]), stderr: "" });
 
-        expect((await provider.recover(task, intent))?.permissionsFingerprint).toBe(fingerprint);
+        expect(await provider.recover(task, intent)).toMatchObject({
+            taskId: task.id, intentId: intent.id, containerName: `mecha-task-${task.id}`, permissionsFingerprint: fingerprint
+        });
+        for (const labels of [{ task_id: "other", intent_id: intent.id }, { task_id: task.id, intent_id: "other" }]) {
+            vi.mocked(docker).mockResolvedValueOnce({ stdout: JSON.stringify([{ Config: { Labels: labels } }]), stderr: "" });
+            await expect(provider.recover(task, intent)).rejects.toThrow("mismatched task labels");
+        }
     });
 
     it("kills the underlying docker exec child when a shell terminal is disposed", async () => {
@@ -167,20 +180,19 @@ describe("LocalDockerProvider", () => {
         expect(child.stdin.writableEnded).toBe(true);
         expect(child.kill).toHaveBeenCalledTimes(1);
     });
-});
 
-it("recovers interrupted provisioning by task and intent labels, without swallowing Docker failures", async () => {
-    const config = testConfig(); const db = new WebuiDatabase(config);
-    const task = createTask({ prompt: "recover" }, config, db);
-    const provider = new LocalDockerProvider(config);
-    const intent = db.createIntent(task, provider.describeProvisioning(task), 120);
-    vi.mocked(docker).mockResolvedValueOnce({ stdout: JSON.stringify([{ Config: { Labels: { task_id: task.id, intent_id: intent.id } } }]), stderr: "" });
-    const handle = await provider.recover(task, intent);
-    expect(handle?.containerName).toBe(`mecha-task-${task.id}`);
-    vi.mocked(docker).mockRejectedValueOnce(new Error("daemon unavailable"));
-    await expect(provider.stop(task, handle!)).rejects.toThrow("daemon unavailable");
-    vi.mocked(docker).mockRejectedValueOnce(new Error("No such container"));
-    await expect(provider.stop(task, handle!)).resolves.toBeUndefined();
-    vi.mocked(docker).mockResolvedValueOnce({ stdout: JSON.stringify([{ Config: { Labels: { task_id: "other" } } }]), stderr: "" });
-    await expect(provider.recover(task, intent)).rejects.toThrow("mismatched task labels");
+    it("propagates Docker Stop failures but ignores verified missing containers", async () => {
+        const config = testConfig();
+        const db = new WebuiDatabase(config);
+        const task = createTask({ prompt: "stop" }, config, db);
+        const handle: RunnerHandle = {
+            provider: "local", taskId: task.id, intentId: "intent",
+            containerName: `fake-${task.id}`, createdAt: task.createdAt
+        };
+        const provider = new LocalDockerProvider(config);
+        vi.mocked(docker).mockRejectedValueOnce(new Error("daemon unavailable"));
+        await expect(provider.stop(task, handle)).rejects.toThrow("daemon unavailable");
+        vi.mocked(docker).mockRejectedValueOnce(new Error("No such container"));
+        await expect(provider.stop(task, handle)).resolves.toBeUndefined();
+    });
 });

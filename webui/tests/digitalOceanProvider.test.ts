@@ -1,15 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DigitalOceanProvider } from "../server/src/providers/DigitalOceanProvider";
+import { assertDigitalOceanMetadataId, DigitalOceanProvider, digitalOceanDropletPayload } from "../server/src/providers/DigitalOceanProvider";
+import * as workspaceTransfer from "../server/src/providers/workspaceTransfer";
 import type { WorkspaceCommand } from "../server/src/providers/workspaceTransfer";
 import { WebuiDatabase } from "../server/src/db";
 import { createTask } from "../server/src/tasks/createTask";
-import type { RunnerHandle } from "../server/src/types";
+import type { ProvisioningIntent, RunnerHandle } from "../server/src/types";
 import { testConfig } from "./helpers";
 
 const cleanup: Array<() => void> = [];
-afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); vi.unstubAllEnvs(); });
+afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function fixture() {
     const config = testConfig();
@@ -19,6 +20,10 @@ function fixture() {
     fs.mkdirSync(path.dirname(config.codex.authJsonPath), { recursive: true });
     fs.writeFileSync(config.codex.authJsonPath, '{"fixture":true}');
     const handle: RunnerHandle = { provider: "digitalocean", taskId: task.id, intentId: "fixture-intent", createdAt: task.createdAt };
+    const intent: ProvisioningIntent = {
+        id: handle.intentId, taskId: task.id, backend: "digitalocean", expectedResourceName: `mecha-task-${task.id}`,
+        createdAt: task.createdAt, reaperGraceUntil: task.createdAt, status: "creating"
+    };
     const calls: Array<{ url: string; method: string }> = [];
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
         calls.push({ url: String(url), method: init?.method ?? "GET" });
@@ -33,19 +38,51 @@ function fixture() {
         vi.stubEnv(config.cloud.liveEnvGuard, "1"); vi.stubEnv("DIGITALOCEAN_TOKEN", "fixture-token");
         fs.writeFileSync(config.cloud.sshPublicKeyPath, "ssh-ed25519 fixture");
     };
-    return { config, task, handle, calls, fetcher, run, provider, live };
+    return { config, task, handle, intent, calls, fetcher, run, provider, live };
 }
 
 describe("DigitalOcean lifecycle", () => {
-    it("guards reused handles before commands or API requests", async () => {
-        const f = fixture(); f.config.cloud.dryRun = false;
+    it.each(["provision", "retained start"] as const)("guards %s before commands or API requests", async (operation) => {
+        const f = fixture(); f.live();
         Object.assign(f.handle, { dropletId: "42", sshHost: "203.0.113.42", bootstrapComplete: true });
-        await expect(f.provider.start(f.task, f.handle)).rejects.toThrow("enabled cloud config");
+        const execute = () => operation === "provision" ? f.provider.provision(f.task, f.intent) : f.provider.start(f.task, f.handle);
+        f.config.cloud.enabled = false;
+        await expect(execute()).rejects.toThrow("enabled cloud config");
         f.config.cloud.enabled = true; vi.stubEnv(f.config.cloud.liveEnvGuard, "");
-        await expect(f.provider.start(f.task, f.handle)).rejects.toThrow("live env guard");
+        await expect(execute()).rejects.toThrow("live env guard");
         vi.stubEnv(f.config.cloud.liveEnvGuard, "1"); vi.stubEnv("DIGITALOCEAN_TOKEN", ""); vi.stubEnv("DO_API_TOKEN", "");
-        await expect(f.provider.start(f.task, f.handle)).rejects.toThrow("host-side DIGITALOCEAN_TOKEN");
+        await expect(execute()).rejects.toThrow("host-side DIGITALOCEAN_TOKEN");
         expect(f.fetcher).not.toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])("prepares configured provisioning metadata without external calls (dryRun=%s)", async (dryRun) => {
+        const f = fixture();
+        if (!dryRun) {
+            f.live();
+            vi.stubEnv("DIGITALOCEAN_TOKEN", undefined);
+            vi.stubEnv("DO_API_TOKEN", "alternate-fixture-token");
+        }
+        // Exercise default dependency wiring while keeping both boundaries fake.
+        vi.stubGlobal("fetch", f.fetcher);
+        vi.spyOn(workspaceTransfer, "runWorkspaceCommand").mockImplementation(f.run);
+        const provider = new DigitalOceanProvider(f.config);
+        Object.assign(f.config.cloud, { region: "sgp1", defaultSize: "s-2vcpu-4gb", backups: true, snapshots: true });
+        const payload = digitalOceanDropletPayload(f.task, f.config, "fingerprint");
+        expect(payload).toMatchObject({ region: "sgp1", image: f.config.cloud.image, size: "s-2vcpu-4gb", backups: true, ssh_keys: ["fingerprint"] });
+        expect(payload.tags).toEqual(["mecha-webui", `task:${f.task.id}`]);
+
+        const handle = await provider.provision(f.task, f.intent);
+        expect(handle.providerPayload).toMatchObject({
+            snapshots: true,
+            droplet: { region: "sgp1", image: f.config.cloud.image, size: "s-2vcpu-4gb", backups: true,
+                tags: ["mecha-webui", `task:${f.task.id}`, `intent:${f.intent.id}`] }
+        });
+        expect(f.fetcher).not.toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it("rejects mismatched droplet metadata IDs", () => {
+        expect(() => assertDigitalOceanMetadataId("123\n", "123")).not.toThrow();
+        expect(() => assertDigitalOceanMetadataId("999\n", "123")).toThrow("metadata id mismatch");
     });
 
     it("keeps dry-run free of live calls and refuses to forget a saved live resource", async () => {
